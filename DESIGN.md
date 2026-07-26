@@ -48,8 +48,9 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 ### 凭据
 
-- 本栈正式使用 New API 渠道密钥把 ChatGPT access token 传给 Aurora。
-- Aurora 当前也支持挂载 `access_tokens.txt` 作为自身账号池，但本栈不采用这条路径。
+- 当前仓库中的目标 Compose 使用 New API 渠道密钥把 ChatGPT access token 传给 Aurora，不挂载本地账号池。
+- [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)说明外部 access token 默认启用，并且可以同时挂载 `access_tokens.txt` 账号池。
+- NAS 上仍在运行的旧 Compose 挂载了 `access_tokens.txt`；这属于旧部署差异，不代表当前仓库已经完成该凭据路径的迁移。
 - `.secrets/access_tokens.txt` 只是本机备份，不挂载到容器，也不得提交。
 - New API 的 `SESSION_SECRET` 只允许存放在被忽略的 `.env` 中。
 
@@ -91,6 +92,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 - 2026-07-26 的 NAS 只读复验确认：旧部署目录中的 Compose 可以解析，四个目标容器均在运行，Mihomo 保持 GLOBAL 模式且出口国家为新加坡，New API 鉴权后的模型列表包含两个聊天模型。
 - NAS 当前仍运行旧目录 `aurora-stack`；本地重排后的 `local_aurora_api` 结构尚未同步，因此新目录结构的实际部署结果仍待确认。
+- 旧部署使用 `mihomo/`、`new-api-data/` 和账号池挂载；当前模板使用 `data/mihomo/`、`data/new-api/` 和外部 token。迁移前必须备份、保持 `SESSION_SECRET`，并明确是否继续保留账号池。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 镜像版本固定策略仍待一次受控升级试验后决定。
 

@@ -89,6 +89,8 @@ cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 编辑 `.env`，把 `SESSION_SECRET` 设为 `openssl rand -hex 16` 生成的随机值。只在首次部署时复制 Mihomo 示例配置；已有 `data/mihomo/config.yaml` 时不要覆盖。
 
 > 本栈不挂载 `access_tokens.txt`：token 在 New API 渠道密钥里填写，再通过 Aurora 的外部 token 能力使用（见 §8）。Aurora 也支持自己的 token 文件账号池，但那是另一种部署方式，本项目没有采用。本地备份只能放在被忽略的 `.secrets/`，不要复制到共享目录。
+>
+> **旧部署迁移边界**：2026-07-26 的 NAS 只读盘点发现，仍在运行的旧目录使用 `mihomo/`、`new-api-data/`，并向 Aurora 挂载 `access_tokens.txt`。本节描述的是当前仓库的新目标结构，不能直接覆盖旧目录。迁移前必须先备份并校验，保持原 `SESSION_SECRET`，再决定是否继续保留账号池挂载。
 
 ---
 
