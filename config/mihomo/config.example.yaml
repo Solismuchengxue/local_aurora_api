@@ -1,0 +1,27 @@
+# 首次启动引导配置。复制到 data/mihomo/config.yaml 后再由订阅或 WebUI 更新。
+# 7890 和 9090 不应直接暴露到公网。
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+mode: global
+
+external-controller: 0.0.0.0:9090
+external-controller-cors:
+  allow-origins:
+    - "*"
+  allow-private-network: true
+secret: ""
+
+proxies:
+  - name: DIRECT
+    type: direct
+    udp: true
+
+proxy-groups:
+  - name: GLOBAL
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,GLOBAL

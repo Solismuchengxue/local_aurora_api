@@ -1,0 +1,43 @@
+# 飞牛 fnOS：Mihomo + Aurora + New API + MetaCubeXD
+services:
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: mihomo
+    ports:
+      - "7890:7890"
+      - "9090:9090"
+    volumes:
+      - ./data/mihomo:/root/.config/mihomo
+    restart: unless-stopped
+
+  aurora:
+    image: ghcr.io/aurora-develop/aurora:latest
+    container_name: aurora
+    ports:
+      - "8080:8080"
+    environment:
+      PROXY_URL: http://mihomo:7890
+      http_proxy: http://mihomo:7890
+      ENABLE_EXTERNAL_TOKEN: "true"
+    depends_on:
+      - mihomo
+    restart: unless-stopped
+
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: new-api
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/new-api:/data
+    environment:
+      TZ: Asia/Shanghai
+      SESSION_SECRET: ${SESSION_SECRET:?请先在 .env 中设置 SESSION_SECRET}
+    restart: unless-stopped
+
+  dashboard:
+    image: ghcr.io/metacubex/metacubexd:latest
+    container_name: metacubexd
+    ports:
+      - "9097:80"
+    restart: unless-stopped
