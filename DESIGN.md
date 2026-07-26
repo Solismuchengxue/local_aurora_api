@@ -91,8 +91,8 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 ## 已知待验证项
 
 - 2026-07-26 的 NAS 只读复验确认：旧部署目录中的 Compose 可以解析，四个目标容器均在运行，Mihomo 保持 GLOBAL 模式且出口国家为新加坡，New API 鉴权后的模型列表包含两个聊天模型。
-- NAS 当前仍运行旧目录 `aurora-stack`。2026-07-27 已在 `local_aurora_api` 工作副本中准备代码、凭据引用和运行数据副本，并通过带账号池 override 的 Compose 静态解析；新目录仍未承担运行服务。
-- 旧部署使用 `mihomo/`、`new-api-data/` 和账号池挂载；当前模板使用 `data/mihomo/`、`data/new-api/` 和外部 token。迁移前必须备份、保持 `SESSION_SECRET`，并明确是否继续保留账号池。
+- 2026-07-27 已完成到 `local_aurora_api` 的受控切换；四个容器的 Compose 工作目录和持久化挂载均指向新结构，GLOBAL、新加坡出口、模型列表和最小聊天请求均验证通过。
+- 首次切换继续通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token。旧目录 `aurora-stack` 与已校验冷备份暂时保留，用于观察期内回滚。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 镜像版本固定策略仍待一次受控升级试验后决定。
 
