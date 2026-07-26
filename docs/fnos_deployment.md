@@ -1,6 +1,6 @@
 # 飞牛 fnOS 部署指南：aurora + new-api 反向代理 ChatGPT Web 为 OpenAI 兼容 API
 
-> 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-26 完成了本地项目结构调整，但没有重新连接 NAS 复验。
+> 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；同日完成只读复验，确认 NAS 仍运行旧目录 `aurora-stack`，本地重排后的 `local_aurora_api` 结构尚未同步。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 
 ---
