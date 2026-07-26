@@ -24,14 +24,14 @@ Local Aurora API 是一套面向飞牛 fnOS 的 Docker Compose 部署配置，�
 cd /vol1/YOUR_USER_ID/local_aurora_api
 ```
 
-创建本地环境文件并填写随机 `SESSION_SECRET`：
+创建本地环境文件，填写随机 `SESSION_SECRET` 和 NAS 的局域网 IPv4 地址：
 
 ```bash
 cp .env.example .env
 openssl rand -hex 16
 ```
 
-把生成的值写入 `.env`。不要提交或分享 `.env`。
+把生成的值写入 `.env` 的 `SESSION_SECRET`，并把 `NAS_LAN_IP` 设置为 NAS 的局域网 IPv4 地址，例如 `192.168.0.38`。不要提交或分享 `.env`。
 
 初始化运行目录：
 
@@ -94,5 +94,5 @@ WorkBuddy 还需要关闭工具调用并避免 URL 自动拼接错误，详见 [
 - access token 会过期，需要在 New API 渠道中定期更新。
 - 思考档不会向第三方客户端返回可见的思考过程。
 - 模型联网搜索的引用标记偶有乱码或截断。
-- `7890` 和 `9090` 默认映射到 NAS；不要将未认证端口直接暴露到公网。
+- `7890` 只供 Compose 内部的 Aurora 使用，不发布到 NAS；`9090` 仅绑定 `.env` 指定的局域网 IPv4 地址。
 - 项目使用第三方容器镜像，升级前应检查上游变更并备份 `data/`。

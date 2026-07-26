@@ -4,8 +4,7 @@ services:
     image: metacubex/mihomo:latest
     container_name: mihomo
     ports:
-      - "7890:7890"
-      - "9090:9090"
+      - "${NAS_LAN_IP:?请先在 .env 中设置 NAS_LAN_IP}:9090:9090"
     volumes:
       - ./data/mihomo:/root/.config/mihomo
     restart: unless-stopped

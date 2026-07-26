@@ -86,7 +86,12 @@ mkdir -p data/mihomo data/new-api
 cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 ```
 
-编辑 `.env`，把 `SESSION_SECRET` 设为 `openssl rand -hex 16` 生成的随机值。只在首次部署时复制 Mihomo 示例配置；已有 `data/mihomo/config.yaml` 时不要覆盖。
+编辑 `.env`：
+
+- 把 `SESSION_SECRET` 设为 `openssl rand -hex 16` 生成的随机值。
+- 把 `NAS_LAN_IP` 设为 NAS 的局域网 IPv4 地址，例如 `192.168.0.38`。该值用于限制 Mihomo 控制端口的监听网卡。
+
+只在首次部署时复制 Mihomo 示例配置；已有 `data/mihomo/config.yaml` 时不要覆盖。
 
 > 本栈不挂载 `access_tokens.txt`：token 在 New API 渠道密钥里填写，再通过 Aurora 的外部 token 能力使用（见 §8）。Aurora 也支持自己的 token 文件账号池，但那是另一种部署方式，本项目没有采用。本地备份只能放在被忽略的 `.secrets/`，不要复制到共享目录。
 >
@@ -101,8 +106,9 @@ cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 其中：
 
 - Mihomo 和 New API 的可变数据统一写入被 Git 忽略的 `data/`。
+- Mihomo 的 `7890` 只在 Compose 网络内提供给 Aurora；`9090` 仅绑定 `NAS_LAN_IP`。
 - Aurora 显式设置 `PROXY_URL`、`http_proxy` 和 `ENABLE_EXTERNAL_TOKEN`。
-- New API 的 `SESSION_SECRET` 必须从本地 `.env` 提供；缺失时 Compose 会直接报错。
+- `SESSION_SECRET` 与 `NAS_LAN_IP` 必须从本地 `.env` 提供；缺失时 Compose 会直接报错。
 
 > 镜像拉取：镜像源配置见 §2，飞牛 daemon 已配 `registry-mirrors`（docker.fnnas.com），`ghcr.io` 与 `metacubex/mihomo` 均可直连。
 
@@ -138,7 +144,7 @@ mihomo 的节点和规则**通过机场订阅导入**，日常管理在 **mihomo
 1. **不要开 TUN 模式**——保持应用级代理，飞牛系统 / IPv6 DDNS 公网访问不受影响。
 2. **出站模式设为 `GLOBAL`**——所有经过 mihomo 的流量统一走 GLOBAL 节点组，绕过规则。
 3. **GLOBAL 组首选节点必须是新加坡 GPT 解锁节点**——这是 aurora 出口节点的唯一决定因素。
-4. `external-controller` 开在 `0.0.0.0:9090`，供 metacubexd 面板连接（compose 已映射）。
+4. 容器内的 `external-controller` 开在 `0.0.0.0:9090`；Compose 只把它发布到 `NAS_LAN_IP:9090`，供局域网浏览器中的 MetaCubeXD 连接。
 
 > ⚠️ **切勿把出站模式改成 `rule`**：规则里通常会把 `chatgpt.com`/`openai.com` 指向机场主组中的其他地区节点，切到 rule 模式会让 aurora 的 ChatGPT 请求改走非新加坡节点，可能解锁失败。
 
@@ -341,9 +347,11 @@ access token 有效期有限。到期现象：Aurora 返回 401 或 New API 渠�
 
 当前设计不启用 Mihomo TUN，并且只有 Aurora 配置 `http_proxy`，因此不会主动接管飞牛系统路由。部署后仍应实际验证 IPv6 DDNS 和防火墙行为。
 
-### 11.4 mihomo 公网暴露风险（安全提示，可选）
+### 11.4 Mihomo 端口边界
 
-Mihomo 的 `7890` 代理端口和 `9090` 控制端口当前都映射到 NAS，首次启动配置也没有认证。若飞牛 IPv6 防火墙未限制这些端口，可能形成公网裸代理或开放控制接口。部署前必须在飞牛防火墙或路由器侧限制入站范围，或为 Mihomo 配置认证与控制密钥。
+Mihomo 的 `7890` 代理端口不发布到 NAS，只供 Compose 网络内的 Aurora 使用。`9090` 控制端口没有默认认证，但只绑定 `.env` 中的 `NAS_LAN_IP`，不会监听 NAS 的 IPv6 地址或其他 IPv4 网卡。
+
+这项绑定不能替代边界防火墙：仍应确认路由器没有把 `9090` 转发到公网，并避免把 `NAS_LAN_IP` 设置成 `0.0.0.0`。
 
 ### 11.5 排障速查
 
@@ -370,4 +378,4 @@ Mihomo 的 `7890` 代理端口和 `9090` 控制端口当前都映射到 NAS，�
 - [ ] 客户端 base_url / api_key / model 配置正确，能对话（§9）
 - [ ] （可选）飞牛桌面出现 New API / Mihomo 面板图标（watchcow GUI 手动添加，§10）
 - [ ] 确认出站模式 `GLOBAL` 且 GLOBAL 首选节点为新加坡解锁节点（§6.1）
-- [ ] 确认公网无法直接访问未认证的 `7890` 和 `9090`
+- [ ] 确认主机未发布 `7890`，`9090` 仅监听 `NAS_LAN_IP`，且路由器没有把 `9090` 转发到公网

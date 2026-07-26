@@ -64,7 +64,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 - 不启用 Mihomo TUN，避免改变 NAS 的系统路由。
 - Aurora 通过 Compose 内部服务名 `mihomo:7890` 使用代理。
-- `7890` 与 `9090` 当前仍映射到主机，部署者必须通过防火墙限制入站范围。
+- `7890` 不发布到主机；`9090` 通过 `NAS_LAN_IP` 仅绑定 NAS 的局域网 IPv4 地址，供浏览器中的 MetaCubeXD 连接。
 - WSL 仅承担静态配置验证，不在本机启动或测试 Mihomo；代理出口以 NAS 实机结果为准。
 - Win11 的 Clash Verge 是独立的本机代理环境，不属于本项目运行拓扑。
 
