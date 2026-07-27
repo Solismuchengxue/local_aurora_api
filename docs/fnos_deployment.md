@@ -359,7 +359,7 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 - session/access token 和响应正文不会写入日志。
 - 同一时刻只允许一个续期进程。
 - 新 token 必须具有更晚的 JWT 到期时间，否则拒绝覆盖。
-- 写入前先用新 token 直测 Aurora 的模型列表和最小聊天。
+- 写入前先用新 token 直测 Aurora 的模型列表和最小聊天；快模型返回空内容时会切换思考模型复验。
 - 使用比较并交换的 SQLite 事务更新渠道，若渠道同时被人工修改则拒绝覆盖。
 - 更新后重启 New API 清理渠道缓存，并使用现有启用的客户端令牌验证完整链路；失败时自动恢复旧渠道密钥并再次验证。
 - 旧 token 保存在 `.secrets/access_tokens.previous.txt`，成功后的当前 token 同步到 `.secrets/access_tokens.txt`，权限均为 `600`。

@@ -256,13 +256,19 @@ def validate_chat_api(base_url: str, authorization: str) -> None:
         raise RefreshError("API validation did not list gpt-5-6-pro")
 
     last_error: RefreshError | None = None
-    for attempt in range(3):
+    validation_models = (
+        "gpt-5-6-pro",
+        "gpt-5-6-thinking",
+        "gpt-5-6-pro",
+        "gpt-5-6-thinking",
+    )
+    for attempt, model in enumerate(validation_models):
         try:
             result = request_json(
                 f"{base_url}/v1/chat/completions",
                 authorization,
                 payload={
-                    "model": "gpt-5-6-pro",
+                    "model": model,
                     "messages": [{"role": "user", "content": "只回答：OK"}],
                     "stream": False,
                 },
@@ -277,7 +283,7 @@ def validate_chat_api(base_url: str, authorization: str) -> None:
             last_error = RefreshError("API validation returned empty content")
         except RefreshError as exc:
             last_error = exc
-        if attempt < 2:
+        if attempt < len(validation_models) - 1:
             time.sleep(8)
     raise last_error or RefreshError("chat validation failed")
 

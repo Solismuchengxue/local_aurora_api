@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = (
@@ -140,6 +141,38 @@ class RefreshTests(unittest.TestCase):
                 self.new,
             )
         self.assertEqual(MODULE.read_channel_token(self.root, 1), self.current)
+
+    def test_chat_validation_falls_back_to_thinking_model(self):
+        chat_models = []
+
+        def request_json(url, authorization, *, payload=None, timeout=30):
+            if payload is None:
+                return {
+                    "data": [
+                        {"id": "gpt-5-6-pro"},
+                        {"id": "gpt-5-6-thinking"},
+                    ]
+                }
+            chat_models.append(payload["model"])
+            content = (
+                ""
+                if payload["model"] == "gpt-5-6-pro"
+                else "OK"
+            )
+            return {
+                "choices": [
+                    {"message": {"content": content}, "finish_reason": "stop"}
+                ]
+            }
+
+        with mock.patch.object(MODULE, "request_json", side_effect=request_json):
+            with mock.patch.object(MODULE.time, "sleep"):
+                MODULE.validate_chat_api("http://example.invalid", "test-key")
+
+        self.assertEqual(
+            chat_models,
+            ["gpt-5-6-pro", "gpt-5-6-thinking"],
+        )
 
 
 if __name__ == "__main__":
