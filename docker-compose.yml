@@ -1,7 +1,8 @@
 # 飞牛 fnOS：Mihomo + Aurora + New API + MetaCubeXD
 services:
   mihomo:
-    image: metacubex/mihomo:latest
+    # 2026-07-27 NAS 已验证基线：v1.19.29
+    image: metacubex/mihomo@sha256:e1d7dadaa9368a52d420d65007e0e0d87cb148d292faa67326eda3fef5757f59
     container_name: mihomo
     ports:
       - "${NAS_LAN_IP:?请先在 .env 中设置 NAS_LAN_IP}:9090:9090"
@@ -10,7 +11,8 @@ services:
     restart: unless-stopped
 
   aurora:
-    image: ghcr.io/aurora-develop/aurora:latest
+    # 2026-07-27 NAS 已验证基线；上游镜像未提供版本标签
+    image: ghcr.io/aurora-develop/aurora@sha256:e5c3b823367dc45d2b1a9c43714cb07f3800cc8ca89ac037550ae37393fcbe14
     container_name: aurora
     ports:
       - "8080:8080"
@@ -23,7 +25,8 @@ services:
     restart: unless-stopped
 
   new-api:
-    image: calciumion/new-api:latest
+    # 2026-07-27 NAS 已验证基线：v1.0.0-rc.21
+    image: calciumion/new-api@sha256:428018a37c0b26c163a3367c18401161707cd0e08d0f26a3dde9ff0caa05e34c
     container_name: new-api
     ports:
       - "3000:3000"
@@ -35,7 +38,8 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: ghcr.io/metacubex/metacubexd:latest
+    # 2026-07-27 NAS 已验证基线：v1.270.5
+    image: ghcr.io/metacubex/metacubexd@sha256:67f7eeacf94a49acda9a509e10e13fa2033f7b46f76c1473164aad7cbe5762b9
     container_name: metacubexd
     ports:
       - "9097:80"

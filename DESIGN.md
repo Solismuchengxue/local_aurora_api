@@ -83,9 +83,9 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 ### 第三方组件
 
-- 容器镜像沿用现有部署中的上游镜像，没有引入新的软件包。
+- 容器镜像固定到 2026-07-27 NAS 已验证运行的不可变 digest，没有引入新的软件包。
 - WatchCow 是可选第三方增强，不是核心运行依赖。
-- `latest` 标签存在上游漂移风险；在没有完成实际升级试验前，不擅自固定新版本。
+- 不直接使用可漂移的 `latest` 标签。升级时一次只更新一个服务的 digest，并在 NAS 完成运行状态、数据、代理出口和 API 验证后再接受新基线。
 
 ## 共享文档
 
@@ -100,7 +100,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法稳定使用 session/access-token 账号池，因此采用外部定时脚本更新 New API 的 SQLite 渠道记录。
 - 旧目录 `aurora-stack` 与已校验冷备份暂时保留，用于观察期内回滚。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
-- 镜像版本固定策略仍待一次受控升级试验后决定。
+- 当前 Compose 已固定四个已验证镜像 digest；尚未执行任何镜像升级，未来升级仍需逐项受控试验。
 
 ## 更新触发
 
