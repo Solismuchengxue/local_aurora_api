@@ -48,7 +48,7 @@
 
 ## 5. 图片生成当前不可用
 
-`gpt-image-2` 不会出现在当前 `GET /v1/models` 结果中，因此需要在 New API 的 Aurora 渠道模型列表和令牌模型范围中手动添加。
+`gpt-image-2` 已从当前 New API 渠道、默认令牌模型范围和 abilities 中隐藏，因此不会出现在鉴权后的 `GET /v1/models` 结果中。只有在 Aurora 升级后的受控复测期间才临时重新注册。
 
 完成注册后，New API 的渠道模型测试可能把 `gpt-image-2` 显示为成功，但这不是出图验收。2026-07-27 的真实 `/v1/images/generations` 请求仍返回 HTTP 403 和 `sentinel prepare failed`，没有 `data[].url` 或 `data[].b64_json`。这是当前 Aurora 与 ChatGPT 图像后端 sentinel 流程之间的兼容问题，不能通过 WorkBuddy 模型开关解决。
 

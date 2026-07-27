@@ -144,6 +144,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_chat_validation_falls_back_to_thinking_model(self):
         chat_models = []
+        chat_prompts = []
 
         def request_json(url, authorization, *, payload=None, timeout=30):
             if payload is None:
@@ -154,6 +155,7 @@ class RefreshTests(unittest.TestCase):
                     ]
                 }
             chat_models.append(payload["model"])
+            chat_prompts.append(payload["messages"][0]["content"])
             content = (
                 ""
                 if payload["model"] == "gpt-5-6-pro"
@@ -172,6 +174,10 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(
             chat_models,
             ["gpt-5-6-pro", "gpt-5-6-thinking"],
+        )
+        self.assertEqual(len(set(chat_prompts)), 2)
+        self.assertTrue(
+            all("AURORA-VERIFY-" in prompt for prompt in chat_prompts)
         )
 
 

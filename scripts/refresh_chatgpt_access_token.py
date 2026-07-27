@@ -263,13 +263,21 @@ def validate_chat_api(base_url: str, authorization: str) -> None:
         "gpt-5-6-thinking",
     )
     for attempt, model in enumerate(validation_models):
+        validation_marker = (
+            f"AURORA-VERIFY-{int(time.time())}-{attempt + 1}"
+        )
         try:
             result = request_json(
                 f"{base_url}/v1/chat/completions",
                 authorization,
                 payload={
                     "model": model,
-                    "messages": [{"role": "user", "content": "只回答：OK"}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"只回答：{validation_marker}",
+                        }
+                    ],
                     "stream": False,
                 },
                 timeout=180,
