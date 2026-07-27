@@ -50,7 +50,7 @@
 
 `gpt-image-2` 不会出现在当前 `GET /v1/models` 结果中，因此需要在 New API 的 Aurora 渠道模型列表和令牌模型范围中手动添加。
 
-完成注册后，最小图片生成请求仍稳定失败于 `sentinel prepare failed`。这是当前 Aurora 与 ChatGPT 图像后端 sentinel 流程之间的兼容问题，不能通过 WorkBuddy 模型开关解决。
+完成注册后，New API 的渠道模型测试可能把 `gpt-image-2` 显示为成功，但这不是出图验收。2026-07-27 的真实 `/v1/images/generations` 请求仍返回 HTTP 403 和 `sentinel prepare failed`，没有 `data[].url` 或 `data[].b64_json`。这是当前 Aurora 与 ChatGPT 图像后端 sentinel 流程之间的兼容问题，不能通过 WorkBuddy 模型开关解决。
 
 WorkBuddy 的 `supportsImages: true` 只表示支持图片输入和看图，不表示这个端点能够生成图片。需要出图时使用 WorkBuddy 自身可用的图片生成能力。
 

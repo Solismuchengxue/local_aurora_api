@@ -78,7 +78,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - 当前 Aurora 构建会拒绝 `reasoning_effort` 和 `reasoning.effort`；它们不是已采用的思考强度控制方式。
 - `gpt-5-6-thinking` 不向第三方客户端返回可见的 `reasoning_content`，不能把思考档描述成可查看思维链。
 - `gpt-5-6-pro` 和 `gpt-5-6-thinking` 均可触发 ChatGPT 原生联网搜索；该能力来自上游模型，不是客户端搜索工具。
-- 图片生成虽有 Aurora 接口，但当前部署稳定失败于 `sentinel prepare failed`，因此不是可用能力。
+- 图片生成虽有 Aurora 接口，但当前部署的真实 `/v1/images/generations` 请求仍以 HTTP 403 失败于 `sentinel prepare failed`，因此不是可用能力；New API 的渠道模型测试显示成功不能作为出图证据。
 - Deep Research 没有一键端点；该低频能力不纳入正式架构，项目不提供相关脚本。
 
 ### 第三方组件

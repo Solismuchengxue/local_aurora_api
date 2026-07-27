@@ -245,10 +245,11 @@ curl http://NAS_IP:3000/v1/chat/completions \
 #### 图片生成：当前不可用
 
 - Aurora 文档虽然提供 `/v1/images/generations` 和 `gpt-image-2`，但当前 `GET /v1/models` 不列出该图片模型，必须在渠道模型列表和令牌模型范围中手动添加。
-- 活端点的最小图片请求仍稳定返回 `sentinel prepare failed`。
+- New API 的“测试全部模型”可以把 `gpt-image-2` 显示为成功并给出响应时间；这只说明渠道测试完成，不能证明返回了图片。
+- 2026-07-27 经 New API 实际调用 `POST /v1/images/generations`，请求 `gpt-image-2`、`1024x1024` 和 `b64_json`，结果为 HTTP 403、`sentinel prepare failed`，响应没有图片数据，也没有生成文件。
 - 失败发生在 ChatGPT 图像生成的 sentinel 准备阶段，不是 New API 的 `model_not_found`。
 
-当前部署不得把图片生成功能标记为可用。WorkBuddy 的 `supportsImages` 表示图片输入/看图，不代表该端点能够生成图片。
+当前部署不得把图片生成功能标记为可用。验收必须以真实图片端点返回非空 `data[].url` 或 `data[].b64_json` 为准，不能使用渠道测试绿灯代替。WorkBuddy 的 `supportsImages` 表示图片输入/看图，不代表该端点能够生成图片。
 
 #### 网页搜索：模型原生联网可用
 
