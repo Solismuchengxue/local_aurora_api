@@ -1,6 +1,0 @@
-services:
-  aurora:
-    environment:
-      Authorization: ${AURORA_AUTHORIZATION:?请先在 .env 中设置 AURORA_AUTHORIZATION}
-    volumes:
-      - ./.secrets/access_tokens.txt:/access_tokens.txt:ro

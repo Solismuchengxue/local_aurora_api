@@ -194,9 +194,7 @@ new-api 官网 `latest` 镜像**首次启动是未初始化状态**，默认 `ro
    - 模型：填 `*` （或留空，后续从上游获取）
 3. 保存
 
-> 💡 **为什么基础 Compose 没有 token 文件**：默认模式在 New API 渠道密钥中填写 ChatGPT token，并通过 `Authorization: Bearer <token>` 交给已启用 `ENABLE_EXTERNAL_TOKEN` 的 Aurora。定时续期属于可选运行模式，通过被忽略的 override 挂载账号池；任何 `.secrets/` 文件都不得提交。
->
-> 启用 §11.1 的定时续期后，渠道密钥改填固定的 `AURORA_AUTHORIZATION`，并通过本地 override 挂载由脚本维护的 `access_tokens.txt`。
+> 💡 **为什么 Compose 没有 token 文件**：New API 渠道密钥中填写 ChatGPT token，并通过 `Authorization: Bearer <token>` 交给已启用 `ENABLE_EXTERNAL_TOKEN` 的 Aurora。§11.1 的可选定时任务会更新这条渠道记录，不改变容器的凭据路径；任何 `.secrets/` 文件都不得提交。
 
 ### ⚠️ 必须做的一步：从上游获取模型
 
@@ -335,39 +333,25 @@ Aurora 没有 ChatGPT Deep Research 的一键端点。由于使用频率很低�
 
 ### 11.1 ChatGPT token 定时续期
 
-access token 有效期有限。基础模式需要在过期前手动更新 New API 渠道密钥。若希望自动维护，可启用项目脚本：
+access token 有效期有限。基础模式需要在过期前手动更新 New API 渠道密钥。默认的单机 SQLite 部署可启用项目脚本自动维护：
 
 1. 在 `.secrets/session_tokens.txt` 中保存一条 ChatGPT session token，文件权限设为 `600`。
-2. 在 `.env` 中设置独立随机值 `AURORA_AUTHORIZATION`。
-3. 复制并启用 override：
+2. 在 New API 渠道页面确认 Aurora 渠道 ID；单渠道首次部署通常为 `1`。
+3. 先做不修改文件的检查，再强制执行一次完整续期：
 
    ```bash
-   cp config/aurora/compose.scheduled-refresh.example.yaml \
-     .secrets/compose.scheduled-refresh.yaml
-   chmod 600 .secrets/compose.scheduled-refresh.yaml
+   python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --dry-run
+   python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --force
    ```
 
-4. 使用 override 重建 Aurora：
+   如果 session 接口此刻仍返回渠道正在使用的同一枚 token，强制运行会以
+   `session exchange did not extend token expiry` 安全退出，不修改数据库。
+   定时任务会在后续检查中继续尝试。
 
-   ```bash
-   docker compose -p aurora-stack \
-     -f docker-compose.yml \
-     -f .secrets/compose.scheduled-refresh.yaml \
-     up -d --force-recreate aurora
-   ```
-
-5. 把 New API 的 Aurora 渠道密钥改成同一个 `AURORA_AUTHORIZATION`。
-6. 先做不修改文件的检查，再强制执行一次完整续期：
-
-   ```bash
-   python3 scripts/refresh_chatgpt_access_token.py --dry-run
-   python3 scripts/refresh_chatgpt_access_token.py --force
-   ```
-
-7. 添加用户级 cron，每天 04:17 和 16:17 检查；脚本只在剩余不足 72 小时时执行换取和重建：
+4. 添加用户级 cron，每天 04:17 和 16:17 检查；脚本只在剩余不足 72 小时时执行换取和更新：
 
    ```cron
-   17 4,16 * * * cd /vol1/YOUR_USER_ID/local_aurora_api && /usr/bin/python3 scripts/refresh_chatgpt_access_token.py --threshold-hours 72 >> .secrets/token-refresh.log 2>&1
+   17 4,16 * * * cd /vol1/YOUR_USER_ID/local_aurora_api && /usr/bin/python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --threshold-hours 72 >> .secrets/token-refresh.log 2>&1
    ```
 
 安全与回滚行为：
@@ -375,9 +359,12 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 - session/access token 和响应正文不会写入日志。
 - 同一时刻只允许一个续期进程。
 - 新 token 必须具有更晚的 JWT 到期时间，否则拒绝覆盖。
-- 更新前保留 `.secrets/access_tokens.previous.txt`，并以 `600` 权限原子替换账号池。
-- 重建后验证模型列表和最小聊天；失败时自动恢复旧 token 并再次重建。
-- Aurora 自带的 `session_tokens.txt` 账号池在当前构建上实测会返回 `no available account of the requested type`，因此这里由外部脚本换取，不把 session token 直接挂载到 Aurora。
+- 写入前先用新 token 直测 Aurora 的模型列表和最小聊天。
+- 使用比较并交换的 SQLite 事务更新渠道，若渠道同时被人工修改则拒绝覆盖。
+- 更新后重启 New API 清理渠道缓存，并使用现有启用的客户端令牌验证完整链路；失败时自动恢复旧渠道密钥并再次验证。
+- 旧 token 保存在 `.secrets/access_tokens.previous.txt`，成功后的当前 token 同步到 `.secrets/access_tokens.txt`，权限均为 `600`。
+- Aurora 自带的账号池在当前镜像上实测存在路径、权限和账号可用性问题，因此这里不挂载任何 token 文件。
+- 脚本只支持项目默认的 `data/new-api/one-api.db`；改用 MySQL 或 PostgreSQL 后不要启用此 cron。
 
 ### 11.2 mihomo 保持 GLOBAL 模式
 

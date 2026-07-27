@@ -11,3 +11,7 @@
 # Swift Cycle 本地维护记录
 /TODO.md
 /DEVLOG.md
+
+# Python 运行缓存
+__pycache__/
+*.pyc

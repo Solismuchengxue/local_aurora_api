@@ -17,10 +17,9 @@ OpenAI 兼容客户端
         │
         ▼
 New API :3000
-        │  Authorization: Bearer <Aurora 固定内部密钥>
+        │  Authorization: Bearer <ChatGPT access token>
         ▼
 Aurora :8080
-        │  access_tokens.txt（由定时任务原子更新）
         │  PROXY_URL / http_proxy
         ▼
 Mihomo :7890 ───── MetaCubeXD :9097
@@ -28,7 +27,7 @@ Mihomo :7890 ───── MetaCubeXD :9097
         ▼
 ChatGPT Web 上游
 
-session_tokens.txt ── 定时续期脚本 ──▶ access_tokens.txt
+session_tokens.txt ── 定时续期脚本 ──▶ New API 渠道密钥
 ```
 
 New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora 显式发送的代理流量；MetaCubeXD 通过 Mihomo 控制端口管理配置。
@@ -39,14 +38,13 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 |---|---|---|
 | `docker-compose.yml` | 服务拓扑和固定运行参数 | 跟踪 |
 | `.env.example` | 必填环境变量名称，不含真实值 | 跟踪 |
-| `config/aurora/` | Aurora 可选 Compose override 示例 | 跟踪 |
 | `config/mihomo/` | 可共享的首次启动示例 | 跟踪 |
 | `scripts/` | 无第三方依赖的运维脚本 | 跟踪 |
 | `tests/` | 运维脚本回归测试 | 跟踪 |
 | `data/` | Mihomo 与 New API 的运行数据 | 忽略 |
 | `docs/` | 长期部署和排障文档 | 跟踪 |
 | `assets/icons/` | WatchCow 可选图标 | 跟踪 |
-| `.secrets/` | 本地凭据、账号池和运行 override | 忽略 |
+| `.secrets/` | 本地凭据、续期锁和恢复副本 | 忽略 |
 | `artifacts/` | 本地第三方安装制品 | 忽略 |
 | `TODO.md`、`DEVLOG.md` | 当前行动和维护证据 | 忽略 |
 
@@ -54,10 +52,10 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 ### 凭据
 
-- 基础 Compose 保留外部 access token 模式，便于首次部署；定时续期通过可选 override 切换到固定内部密钥和本地 `access_tokens.txt` 账号池。
-- [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)支持 access、refresh 和 session token 账号池；当前构建的 session 账号池初始化实测不可用，因此不直接挂载 `session_tokens.txt`。
-- 定时任务经 Mihomo 使用 session token 换取新 access token，只有在新到期时间更晚时才原子更新账号池。
-- `.secrets/access_tokens.txt`、`.secrets/session_tokens.txt`、内部密钥和 override 均不得提交、打印或外发。
+- New API 渠道密钥把 ChatGPT access token 传给已启用外部 token 的 Aurora。
+- [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)支持 access、refresh 和 session token 账号池；当前镜像的账号池路径、权限和可用性实测不稳定，因此正式路径不依赖账号池。
+- 定时任务经 Mihomo 使用 session token 换取新 access token，直测 Aurora 后以 SQLite 事务更新 New API 渠道密钥，重启 New API 清理缓存，再通过现有客户端令牌验证完整链路。
+- `.secrets/access_tokens.txt` 和 `.secrets/session_tokens.txt` 只作本地续期输入与恢复副本，不挂载到容器，不得提交、打印或外发。
 - New API 的 `SESSION_SECRET` 只允许存放在被忽略的 `.env` 中。
 
 ### 运行数据
@@ -98,8 +96,8 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 - 2026-07-26 的 NAS 只读复验确认：旧部署目录中的 Compose 可以解析，四个目标容器均在运行，Mihomo 保持 GLOBAL 模式且出口国家为新加坡，New API 鉴权后的模型列表包含两个聊天模型。
 - 2026-07-27 已完成到 `local_aurora_api` 的受控切换；四个容器的 Compose 工作目录和持久化挂载均指向新结构，GLOBAL、新加坡出口、模型列表和最小聊天请求均验证通过。
-- 首次切换继续通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token；定时续期切换完成前仍以该路径为回滚基线。
-- session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法把 session-only 账号池激活为可聊天账号，因此采用外部定时脚本更新 access-token pool。
+- 首次切换曾通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token；该挂载不再作为定时续期的正式依赖。
+- session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法稳定使用 session/access-token 账号池，因此采用外部定时脚本更新 New API 的 SQLite 渠道记录。
 - 旧目录 `aurora-stack` 与已校验冷备份暂时保留，用于观察期内回滚。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 镜像版本固定策略仍待一次受控升级试验后决定。
