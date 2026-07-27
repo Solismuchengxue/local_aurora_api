@@ -54,7 +54,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 - New API 渠道密钥把 ChatGPT access token 传给已启用外部 token 的 Aurora。
 - [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)支持 access、refresh 和 session token 账号池；当前镜像的账号池路径、权限和可用性实测不稳定，因此正式路径不依赖账号池。
-- 定时任务经 Mihomo 使用 session token 换取新 access token，直测 Aurora 后以 SQLite 事务更新 New API 渠道密钥，重启 New API 清理缓存，再通过现有客户端令牌验证完整链路。
+- 定时任务经 Mihomo 使用 session token 换取新 access token，直测 Aurora 后以 SQLite 事务更新 New API 渠道密钥，重启 New API 清理缓存，再通过现有客户端令牌验证模型列表、鉴权和聊天响应结构。上游偶发的 HTTP 200 空正文不等同于 token 失效，不应触发凭据回滚。
 - `.secrets/access_tokens.txt` 和 `.secrets/session_tokens.txt` 只作本地续期输入与恢复副本，不挂载到容器，不得提交、打印或外发。
 - New API 的 `SESSION_SECRET` 只允许存放在被忽略的 `.env` 中。
 

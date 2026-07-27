@@ -76,7 +76,7 @@ WorkBuddy 还需要关闭工具调用并避免 URL 自动拼接错误，详见 [
 
 ## 可选：定时续期
 
-项目提供不依赖第三方 Python 包的续期脚本。它每天由 NAS 的 cron 检查两次，只在 access token 剩余不足 72 小时时才使用本地 session token 换新；新 token 会先直连 Aurora 验证，再以 SQLite 事务更新 New API 渠道，并通过完整链路执行真实聊天验证。
+项目提供不依赖第三方 Python 包的续期脚本。它每天由 NAS 的 cron 检查两次，只在 access token 剩余不足 72 小时时才使用本地 session token 换新；新 token 会先直连 Aurora 验证，再以 SQLite 事务更新 New API 渠道，并通过完整链路执行真实聊天请求、校验响应结构。Aurora 已实测会偶发返回 HTTP 200 空内容，因此续期成败不以本轮正文非空为条件。
 
 更新失败时会恢复旧渠道密钥。此模式适用于本项目默认的单机 SQLite 部署，完整配置见部署指南的“ChatGPT token 定时续期”。
 

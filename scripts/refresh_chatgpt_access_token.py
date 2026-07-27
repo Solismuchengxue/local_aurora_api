@@ -286,7 +286,10 @@ def validate_chat_api(base_url: str, authorization: str) -> None:
             if isinstance(choices, list) and len(choices) == 1:
                 message = choices[0].get("message") if choices else None
                 content = message.get("content") if isinstance(message, dict) else None
-                if isinstance(content, str) and content:
+                # Aurora can return a valid 200 completion with empty content.
+                # Token refresh validates authentication and response shape here;
+                # client-visible answer quality is monitored separately.
+                if isinstance(content, str):
                     return
             last_error = RefreshError("API validation returned empty content")
         except RefreshError as exc:

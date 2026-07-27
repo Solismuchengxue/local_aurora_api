@@ -156,14 +156,11 @@ class RefreshTests(unittest.TestCase):
                 }
             chat_models.append(payload["model"])
             chat_prompts.append(payload["messages"][0]["content"])
-            content = (
-                ""
-                if payload["model"] == "gpt-5-6-pro"
-                else "OK"
-            )
+            if payload["model"] == "gpt-5-6-pro":
+                return {"choices": []}
             return {
                 "choices": [
-                    {"message": {"content": content}, "finish_reason": "stop"}
+                    {"message": {"content": "OK"}, "finish_reason": "stop"}
                 ]
             }
 
@@ -179,6 +176,30 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(
             all("AURORA-VERIFY-" in prompt for prompt in chat_prompts)
         )
+
+    def test_chat_validation_accepts_valid_empty_completion(self):
+        chat_models = []
+
+        def request_json(url, authorization, *, payload=None, timeout=30):
+            if payload is None:
+                return {"data": [{"id": "gpt-5-6-pro"}]}
+            chat_models.append(payload["model"])
+            return {
+                "choices": [
+                    {"message": {"content": ""}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "completion_tokens": 0,
+                    "total_tokens": 18,
+                },
+            }
+
+        with mock.patch.object(MODULE, "request_json", side_effect=request_json):
+            with mock.patch.object(MODULE.time, "sleep"):
+                MODULE.validate_chat_api("http://example.invalid", "test-key")
+
+        self.assertEqual(chat_models, ["gpt-5-6-pro"])
 
 
 if __name__ == "__main__":
