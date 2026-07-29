@@ -54,14 +54,36 @@ def overall_status(results: list[CheckResult]) -> str:
     return max(results, key=lambda item: STATUS_ORDER[item.status]).status
 
 
+def _sanitize_value(value: object, secrets: tuple[str, ...]) -> object:
+    if isinstance(value, str):
+        return safe_text(value, secrets)
+    if isinstance(value, dict):
+        return {
+            _sanitize_value(key, secrets): _sanitize_value(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_value(item, secrets) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_value(item, secrets) for item in value)
+    return value
+
+
 def build_report(
     results: list[CheckResult],
     checked_at: str,
+    secrets: tuple[str, ...] = (),
 ) -> dict[str, object]:
+    checks = []
+    for result in results:
+        check = asdict(result)
+        check["summary"] = safe_text(check["summary"], secrets)
+        check["details"] = _sanitize_value(check["details"], secrets)
+        checks.append(check)
     return {
         "checked_at": checked_at,
         "overall": overall_status(results),
-        "checks": [asdict(result) for result in results],
+        "checks": checks,
     }
 
 

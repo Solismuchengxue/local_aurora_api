@@ -18,6 +18,39 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ResultTests(unittest.TestCase):
+    def test_check_result_rejects_unknown_status(self):
+        with self.assertRaises(ValueError) as error:
+            MODULE.CheckResult("unknown", "UNKNOWN", "invalid", {})
+        self.assertEqual(str(error.exception), "unknown check status")
+
+    def test_build_report_redacts_known_secrets_before_rendering(self):
+        secret = "test-token-value"
+        results = [
+            MODULE.CheckResult(
+                "containers",
+                "PASS",
+                f"容器令牌为 {secret}",
+                {
+                    "token": secret,
+                    "nested": [
+                        {"message": f"嵌套令牌为 {secret}"},
+                        (secret,),
+                    ],
+                },
+            )
+        ]
+        report = MODULE.build_report(
+            results,
+            "2026-07-29T12:00:00+08:00",
+            secrets=(secret,),
+        )
+
+        self.assertNotIn(secret, repr(report))
+        self.assertNotIn(secret, MODULE.render_json(report))
+        self.assertNotIn(secret, MODULE.render_human(report))
+        self.assertEqual(results[0].summary, f"容器令牌为 {secret}")
+        self.assertEqual(results[0].details["token"], secret)
+
     def test_overall_status_uses_worst_result(self):
         results = [
             MODULE.CheckResult("a", "PASS", "ok", {}),
