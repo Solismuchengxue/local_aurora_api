@@ -8,8 +8,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import sqlite3
+import subprocess
 import sys
+import time
 from typing import Callable
+
+import refresh_chatgpt_access_token as token_refresh
 
 
 STATUS_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -21,6 +26,17 @@ CHECK_LABELS = {
     "mihomo": "代理",
     "models": "模型",
     "chat": "聊天",
+}
+EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
+LOG_FIELDS = {
+    "time",
+    "event",
+    "remaining_seconds",
+    "channel_id",
+    "reason",
+    "previous_exp",
+    "new_exp",
+    "extension_seconds",
 }
 
 
@@ -46,6 +62,230 @@ def safe_text(
         if secret:
             text = text.replace(secret, "[redacted]")
     return text[:limit]
+
+
+def run_command(
+    args: list[str],
+    timeout: int = 20,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def check_containers(
+    run: Callable[..., subprocess.CompletedProcess[str]] = run_command,
+) -> CheckResult:
+    try:
+        completed = run(
+            ["docker", "inspect", *EXPECTED_CONTAINERS],
+            timeout=20,
+        )
+        if completed.returncode != 0:
+            return CheckResult(
+                "containers",
+                "FAIL",
+                "无法读取预期容器状态",
+                {"error": "docker_inspect_failed"},
+            )
+        inspected = json.loads(completed.stdout)
+        states = {}
+        for item in inspected:
+            name = str(item.get("Name", "")).lstrip("/")
+            if name in EXPECTED_CONTAINERS:
+                states[name] = {
+                    "state": item.get("State", {}).get("Status"),
+                    "restart_count": item.get("RestartCount"),
+                }
+        healthy = (
+            set(states) == set(EXPECTED_CONTAINERS)
+            and all(
+                value["state"] == "running"
+                and value["restart_count"] == 0
+                for value in states.values()
+            )
+        )
+        return CheckResult(
+            "containers",
+            "PASS" if healthy else "FAIL",
+            (
+                "4/4 运行，重启次数均为 0"
+                if healthy
+                else "存在缺失、停止或已重启的容器"
+            ),
+            {
+                "running": sum(
+                    value["state"] == "running"
+                    for value in states.values()
+                ),
+                "containers": states,
+            },
+        )
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return CheckResult(
+            "containers",
+            "FAIL",
+            "Docker 状态检查失败",
+            {"error": "docker_inspect_error"},
+        )
+
+
+def check_database(
+    root: Path,
+    channel_id: int,
+    now: int,
+) -> tuple[CheckResult, str | None, tuple[str, ...]]:
+    path = root / "data" / "new-api" / "one-api.db"
+    channel_token = ""
+    client_token = ""
+    try:
+        with sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro",
+            uri=True,
+            timeout=30,
+        ) as database:
+            integrity = database.execute("PRAGMA integrity_check").fetchone()
+            channel = database.execute(
+                "SELECT key FROM channels WHERE id = ? AND status = 1",
+                (channel_id,),
+            ).fetchone()
+            client = database.execute(
+                """
+                SELECT key FROM tokens
+                WHERE status = 1
+                  AND (expired_time = -1 OR expired_time > ?)
+                  AND (unlimited_quota = 1 OR remain_quota > 0)
+                ORDER BY id LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+        if integrity != ("ok",) or channel is None or client is None:
+            raise ValueError("required database state is unavailable")
+        channel_token = str(channel[0])
+        client_token = str(client[0])
+        client_token = (
+            client_token
+            if client_token.startswith("sk-")
+            else f"sk-{client_token}"
+        )
+        remaining = token_refresh.jwt_exp(channel_token) - now
+        status = (
+            "FAIL"
+            if remaining <= 0
+            else "WARN"
+            if remaining <= 72 * 3600
+            else "PASS"
+        )
+        summary = (
+            "渠道 Token 已过期"
+            if remaining <= 0
+            else f"数据库完整，Token 剩余 {remaining // 3600} 小时"
+        )
+        return (
+            CheckResult(
+                "database",
+                status,
+                summary,
+                {
+                    "integrity": "ok",
+                    "remaining_seconds": remaining,
+                    "expires_at": datetime.fromtimestamp(
+                        now + remaining
+                    ).astimezone().isoformat(timespec="seconds"),
+                },
+            ),
+            client_token,
+            (channel_token, client_token),
+        )
+    except (
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+        token_refresh.RefreshError,
+    ):
+        secrets = tuple(
+            value for value in (channel_token, client_token) if value
+        )
+        return (
+            CheckResult(
+                "database",
+                "FAIL",
+                "数据库、渠道 Token 或客户端令牌检查失败",
+                {"error": "database_state_invalid"},
+            ),
+            None,
+            secrets,
+        )
+
+
+def check_refresh_log(
+    root: Path,
+    secrets: tuple[str, ...] = (),
+) -> CheckResult:
+    path = root / ".secrets" / "token-refresh.log"
+    if not path.exists() or path.stat().st_size == 0:
+        return CheckResult(
+            "refresh_log",
+            "WARN",
+            "续期日志尚不存在或为空",
+            {"event": None},
+        )
+    records = []
+    invalid_lines = 0
+    try:
+        for line in path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines():
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_lines += 1
+                continue
+            if isinstance(raw, dict):
+                record = {
+                    key: (
+                        safe_text(raw[key], secrets)
+                        if key == "reason"
+                        else raw[key]
+                    )
+                    for key in LOG_FIELDS
+                    if key in raw
+                }
+                records.append(record)
+    except OSError:
+        return CheckResult(
+            "refresh_log",
+            "FAIL",
+            "无法读取续期日志",
+            {"error": "refresh_log_read_failed"},
+        )
+    if not records:
+        return CheckResult(
+            "refresh_log",
+            "FAIL",
+            "续期日志中没有合法 JSON 事件",
+            {"invalid_lines": invalid_lines},
+        )
+    latest = records[-1]
+    event = latest.get("event")
+    if event == "refresh_failed":
+        status = "FAIL"
+    elif event in {"refresh_skipped", "refresh_succeeded"}:
+        status = "WARN" if invalid_lines else "PASS"
+    else:
+        status = "FAIL"
+    return CheckResult(
+        "refresh_log",
+        status,
+        f"最新事件为 {event or 'unknown'}",
+        {**latest, "invalid_lines": invalid_lines},
+    )
 
 
 def overall_status(results: list[CheckResult]) -> str:

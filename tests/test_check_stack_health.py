@@ -1,8 +1,14 @@
+import base64
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 SCRIPT = (
@@ -10,6 +16,7 @@ SCRIPT = (
     / "scripts"
     / "check_stack_health.py"
 )
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("stack_health", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -127,6 +134,204 @@ class ResultTests(unittest.TestCase):
         human = MODULE.render_human(report)
         self.assertIn("[通过] 容器", human)
         self.assertIn("总体：通过", human)
+
+
+class ContainerTests(unittest.TestCase):
+    def test_all_expected_containers_are_running_without_restarts(self):
+        payload = [
+            {
+                "Name": "/aurora",
+                "State": {"Status": "running"},
+                "RestartCount": 0,
+            },
+            {
+                "Name": "/new-api",
+                "State": {"Status": "running"},
+                "RestartCount": 0,
+            },
+            {
+                "Name": "/mihomo",
+                "State": {"Status": "running"},
+                "RestartCount": 0,
+            },
+            {
+                "Name": "/metacubexd",
+                "State": {"Status": "running"},
+                "RestartCount": 0,
+            },
+        ]
+        run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+        )
+        result = MODULE.check_containers(run)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.details["running"], 4)
+
+    def test_stopped_or_restarted_container_fails(self):
+        payload = [
+            {
+                "Name": "/aurora",
+                "State": {"Status": "exited"},
+                "RestartCount": 1,
+            }
+        ]
+        run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+        )
+        result = MODULE.check_containers(run)
+        self.assertEqual(result.status, "FAIL")
+        self.assertNotIn("secret", result.summary.lower())
+
+
+def make_token(exp: int, marker: str) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp, "marker": marker}).encode()
+    ).decode().rstrip("=")
+    return f"{header}.{payload}.signature-{marker}"
+
+
+class DatabaseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        db_dir = self.root / "data" / "new-api"
+        db_dir.mkdir(parents=True)
+        self.database = db_dir / "one-api.db"
+        self.now = 1_700_000_000
+        self.channel_token = make_token(
+            self.now + 7 * 24 * 3600,
+            "channel",
+        )
+        with sqlite3.connect(self.database) as database:
+            database.execute(
+                "CREATE TABLE channels "
+                "(id INTEGER PRIMARY KEY, key TEXT, status INTEGER)"
+            )
+            database.execute(
+                "CREATE TABLE tokens "
+                "(id INTEGER PRIMARY KEY, key TEXT, status INTEGER, "
+                "expired_time INTEGER, unlimited_quota INTEGER, "
+                "remain_quota INTEGER)"
+            )
+            database.execute(
+                "INSERT INTO channels VALUES (1, ?, 1)",
+                (self.channel_token,),
+            )
+            database.execute(
+                "INSERT INTO tokens VALUES (1, ?, 1, -1, 1, 0)",
+                ("client-token-value",),
+            )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_healthy_database_returns_client_token_outside_details(self):
+        result, client_token, secrets = MODULE.check_database(
+            self.root,
+            1,
+            self.now,
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(client_token, "sk-client-token-value")
+        self.assertIn(self.channel_token, secrets)
+        serialized = json.dumps(result.details)
+        self.assertNotIn(self.channel_token, serialized)
+        self.assertNotIn("client-token-value", serialized)
+        self.assertNotIn("sk-client-token-value", serialized)
+
+    def test_token_inside_threshold_warns(self):
+        near = make_token(self.now + 48 * 3600, "near")
+        with sqlite3.connect(self.database) as database:
+            database.execute(
+                "UPDATE channels SET key = ? WHERE id = 1",
+                (near,),
+            )
+        result, _, _ = MODULE.check_database(self.root, 1, self.now)
+        self.assertEqual(result.status, "WARN")
+
+    def test_expired_token_fails(self):
+        expired = make_token(self.now - 1, "expired")
+        with sqlite3.connect(self.database) as database:
+            database.execute(
+                "UPDATE channels SET key = ? WHERE id = 1",
+                (expired,),
+            )
+        result, _, _ = MODULE.check_database(self.root, 1, self.now)
+        self.assertEqual(result.status, "FAIL")
+
+
+class RefreshLogTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / ".secrets").mkdir()
+        self.log = self.root / ".secrets" / "token-refresh.log"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_missing_log_warns(self):
+        result = MODULE.check_refresh_log(self.root)
+        self.assertEqual(result.status, "WARN")
+
+    def test_latest_successful_event_passes(self):
+        self.log.write_text(
+            json.dumps(
+                {
+                    "time": "2026-07-29T04:17:01+0800",
+                    "event": "refresh_skipped",
+                    "remaining_seconds": 681883,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = MODULE.check_refresh_log(self.root)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.details["event"], "refresh_skipped")
+
+    def test_invalid_line_warns_when_valid_event_exists(self):
+        self.log.write_text(
+            "not-json\n"
+            + json.dumps(
+                {
+                    "time": "2026-07-29T04:17:01+0800",
+                    "event": "refresh_skipped",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = MODULE.check_refresh_log(self.root)
+        self.assertEqual(result.status, "WARN")
+
+    def test_refresh_failed_fails_and_redacts_secret(self):
+        secret = "known-secret"
+        self.log.write_text(
+            json.dumps(
+                {
+                    "time": "2026-07-29T04:17:01+0800",
+                    "event": "refresh_failed",
+                    "reason": f"request failed {secret}",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = MODULE.check_refresh_log(self.root, (secret,))
+        self.assertEqual(result.status, "FAIL")
+        self.assertNotIn(secret, json.dumps(result.details))
 
 
 if __name__ == "__main__":
