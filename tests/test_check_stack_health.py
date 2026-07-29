@@ -739,6 +739,118 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("channel-secret", serialized)
         self.assertNotIn(secret, serialized)
 
+    def test_failed_database_blocks_downstream_checks_with_client_token(self):
+        def pass_result(name: str) -> MODULE.CheckResult:
+            return MODULE.CheckResult(name, "PASS", "ok", {})
+
+        models = mock.Mock(return_value=pass_result("models"))
+        chat = mock.Mock(return_value=pass_result("chat"))
+        with (
+            mock.patch.object(
+                MODULE,
+                "check_containers",
+                return_value=pass_result("containers"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_database",
+                return_value=(
+                    MODULE.CheckResult(
+                        "database",
+                        "FAIL",
+                        "database failed",
+                        {},
+                    ),
+                    "client-secret",
+                    ("client-secret",),
+                ),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_refresh_log",
+                return_value=pass_result("refresh_log"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_mihomo",
+                return_value=pass_result("mihomo"),
+            ),
+            mock.patch.object(MODULE, "check_models", models),
+            mock.patch.object(MODULE, "check_chat", chat),
+        ):
+            report = MODULE.run_health_check(Path("/example"), 1, now=1)
+
+        models.assert_not_called()
+        chat.assert_not_called()
+        self.assertEqual(
+            report["checks"][4],
+            {
+                "name": "models",
+                "status": "FAIL",
+                "summary": "缺少前置检查：database",
+                "details": {
+                    "error": "dependency_failed",
+                    "dependency": "database",
+                },
+            },
+        )
+        self.assertEqual(
+            report["checks"][5],
+            {
+                "name": "chat",
+                "status": "FAIL",
+                "summary": "缺少前置检查：database",
+                "details": {
+                    "error": "dependency_failed",
+                    "dependency": "database",
+                },
+            },
+        )
+
+    def test_warn_database_allows_downstream_checks_with_client_token(self):
+        def pass_result(name: str) -> MODULE.CheckResult:
+            return MODULE.CheckResult(name, "PASS", "ok", {})
+
+        models = mock.Mock(return_value=pass_result("models"))
+        chat = mock.Mock(return_value=pass_result("chat"))
+        with (
+            mock.patch.object(
+                MODULE,
+                "check_containers",
+                return_value=pass_result("containers"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_database",
+                return_value=(
+                    MODULE.CheckResult(
+                        "database",
+                        "WARN",
+                        "database warning",
+                        {},
+                    ),
+                    "client-secret",
+                    ("client-secret",),
+                ),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_refresh_log",
+                return_value=pass_result("refresh_log"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_mihomo",
+                return_value=pass_result("mihomo"),
+            ),
+            mock.patch.object(MODULE, "check_models", models),
+            mock.patch.object(MODULE, "check_chat", chat),
+        ):
+            MODULE.run_health_check(Path("/example"), 1, now=1)
+
+        models.assert_called_once_with("client-secret")
+        chat.assert_called_once_with("client-secret")
+
     def test_main_json_output_and_exit_codes(self):
         report = {
             "checked_at": "2026-07-29T12:00:00+08:00",

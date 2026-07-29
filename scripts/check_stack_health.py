@@ -688,7 +688,7 @@ def run_health_check(
     )
     refresh_log = check_refresh_log(root, secrets)
     mihomo = check_mihomo()
-    if client_token is None:
+    if database.status == "FAIL" or client_token is None:
         models = dependency_failure("models", "database")
         chat = dependency_failure("chat", "database")
     else:
