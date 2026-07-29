@@ -125,6 +125,48 @@ def fetch_text_via_proxy(
         return response.read(64 * 1024).decode("utf-8", "replace")
 
 
+def request_json_200(
+    url: str,
+    authorization: str,
+    *,
+    payload: dict[str, object] | None = None,
+    timeout: int = 30,
+) -> dict[str, object]:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Authorization": f"Bearer {authorization}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        raise token_refresh.RefreshError(
+            "health API request returned non-200 status"
+        ) from exc
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise token_refresh.RefreshError("health API request failed") from exc
+    if status != 200:
+        raise token_refresh.RefreshError(
+            "health API request returned non-200 status"
+        )
+    try:
+        result = json.loads(body)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise token_refresh.RefreshError(
+            "health API response was not valid JSON"
+        ) from exc
+    if not isinstance(result, dict):
+        raise token_refresh.RefreshError("health API response was not an object")
+    return result
+
+
 def check_mihomo(
     fetch_json: Callable[..., dict[str, object]] = fetch_json_url,
     fetch_text: Callable[..., str] = fetch_text_via_proxy,
@@ -133,15 +175,21 @@ def check_mihomo(
     try:
         control_url, proxy_url = discover_mihomo_endpoints(run)
         config = fetch_json(f"{control_url}/configs", timeout=20)
+        if not isinstance(config, dict):
+            raise ValueError("mihomo_config_invalid")
         global_proxy = fetch_json(
             f"{control_url}/proxies/GLOBAL",
             timeout=20,
         )
+        if not isinstance(global_proxy, dict):
+            raise ValueError("mihomo_global_proxy_invalid")
         trace = fetch_text(
             "https://www.cloudflare.com/cdn-cgi/trace",
             proxy_url,
             timeout=30,
         )
+        if not isinstance(trace, str):
+            raise ValueError("mihomo_trace_invalid")
         values = dict(
             line.split("=", 1)
             for line in trace.splitlines()
@@ -168,6 +216,7 @@ def check_mihomo(
     except (
         OSError,
         RuntimeError,
+        subprocess.SubprocessError,
         TimeoutError,
         urllib.error.URLError,
         ValueError,
@@ -183,9 +232,7 @@ def check_mihomo(
 
 def check_models(
     client_token: str,
-    request: Callable[..., dict[str, object]] = (
-        token_refresh.request_json
-    ),
+    request: Callable[..., dict[str, object]] = request_json_200,
 ) -> CheckResult:
     try:
         payload = request(
@@ -225,9 +272,7 @@ def check_models(
 
 def check_chat(
     client_token: str,
-    request: Callable[..., dict[str, object]] = (
-        token_refresh.request_json
-    ),
+    request: Callable[..., dict[str, object]] = request_json_200,
 ) -> CheckResult:
     failures = 0
     for model in ("gpt-5-6-pro", "gpt-5-6-thinking"):

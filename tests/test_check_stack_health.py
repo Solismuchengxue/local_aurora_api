@@ -461,6 +461,129 @@ class MihomoTests(unittest.TestCase):
             result = MODULE.check_mihomo(fetch_json, fetch_text)
         self.assertEqual(result.status, "FAIL")
 
+    def test_docker_inspect_timeout_returns_fixed_failure(self):
+        run = mock.Mock(
+            side_effect=subprocess.TimeoutExpired(["docker", "inspect"], 15)
+        )
+        result = MODULE.check_mihomo(run=run)
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+
+    def test_non_object_config_returns_fixed_failure(self):
+        fetch_json = mock.Mock(side_effect=[[], {"now": "Singapore Node"}])
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            result = MODULE.check_mihomo(
+                fetch_json,
+                mock.Mock(return_value="loc=SG\n"),
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+
+    def test_non_object_global_proxy_returns_fixed_failure(self):
+        fetch_json = mock.Mock(side_effect=[{"mode": "global"}, []])
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            result = MODULE.check_mihomo(
+                fetch_json,
+                mock.Mock(return_value="loc=SG\n"),
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+
+    def test_non_text_trace_returns_fixed_failure(self):
+        fetch_json = mock.Mock(
+            side_effect=[
+                {"mode": "global"},
+                {"now": "Singapore Node"},
+            ]
+        )
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            result = MODULE.check_mihomo(fetch_json, mock.Mock(return_value=1))
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+
+
+class StrictHttpTests(unittest.TestCase):
+    def make_urlopen(self, status, body):
+        response = mock.MagicMock()
+        response.status = status
+        response.read.return_value = body
+        urlopen = mock.MagicMock()
+        urlopen.return_value.__enter__.return_value = response
+        return urlopen
+
+    def test_request_json_200_rejects_created_response(self):
+        urlopen = self.make_urlopen(
+            201,
+            json.dumps(
+                {"choices": [{"message": {"content": "OK"}}]}
+            ).encode(),
+        )
+        with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
+            with self.assertRaises(MODULE.token_refresh.RefreshError):
+                MODULE.request_json_200(
+                    "http://127.0.0.1:3000/v1/chat/completions",
+                    "client-secret",
+                    payload={"model": "gpt-5-6-pro"},
+                )
+
+    def test_request_json_200_accepts_object_response(self):
+        expected = {"data": [{"id": "gpt-5-6-pro"}]}
+        urlopen = self.make_urlopen(200, json.dumps(expected).encode())
+        with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
+            result = MODULE.request_json_200(
+                "http://127.0.0.1:3000/v1/models",
+                "client-secret",
+            )
+        self.assertEqual(result, expected)
+
+    def test_request_json_200_rejects_non_object_json(self):
+        urlopen = self.make_urlopen(200, b"[]")
+        with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
+            with self.assertRaises(MODULE.token_refresh.RefreshError):
+                MODULE.request_json_200(
+                    "http://127.0.0.1:3000/v1/models",
+                    "client-secret",
+                )
+
+    def test_default_chat_request_rejects_created_completion(self):
+        urlopen = self.make_urlopen(
+            201,
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {"content": "OK"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            ).encode(),
+        )
+        with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
+            result = MODULE.check_chat("client-secret")
+        self.assertEqual(result.status, "FAIL")
+
 
 class ModelTests(unittest.TestCase):
     def test_exact_models_pass(self):
