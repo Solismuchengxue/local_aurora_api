@@ -28,12 +28,14 @@ CHECK_LABELS = {
     "chat": "聊天",
 }
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
-LOG_FIELDS = {
-    "time",
-    "event",
+KNOWN_REFRESH_EVENTS = {
+    "refresh_skipped",
+    "refresh_succeeded",
+    "refresh_failed",
+}
+LOG_INTEGER_FIELDS = {
     "remaining_seconds",
     "channel_id",
-    "reason",
     "previous_exp",
     "new_exp",
     "extension_seconds",
@@ -93,14 +95,31 @@ def check_containers(
                 {"error": "docker_inspect_failed"},
             )
         inspected = json.loads(completed.stdout)
+        if not isinstance(inspected, list):
+            raise ValueError("docker inspect output was not a list")
         states = {}
         for item in inspected:
-            name = str(item.get("Name", "")).lstrip("/")
-            if name in EXPECTED_CONTAINERS:
-                states[name] = {
-                    "state": item.get("State", {}).get("Status"),
-                    "restart_count": item.get("RestartCount"),
-                }
+            if not isinstance(item, dict):
+                raise ValueError("docker inspect item was not an object")
+            raw_name = item.get("Name")
+            if not isinstance(raw_name, str):
+                raise ValueError("docker inspect name was invalid")
+            name = raw_name.lstrip("/")
+            if name not in EXPECTED_CONTAINERS:
+                continue
+            state = item.get("State")
+            restart_count = item.get("RestartCount")
+            if (
+                not isinstance(state, dict)
+                or not isinstance(state.get("Status"), str)
+                or not isinstance(restart_count, int)
+                or isinstance(restart_count, bool)
+            ):
+                raise ValueError("docker inspect state was invalid")
+            states[name] = {
+                "state": state["Status"],
+                "restart_count": restart_count,
+            }
         healthy = (
             set(states) == set(EXPECTED_CONTAINERS)
             and all(
@@ -125,7 +144,12 @@ def check_containers(
                 "containers": states,
             },
         )
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
         return CheckResult(
             "containers",
             "FAIL",
@@ -141,6 +165,7 @@ def check_database(
 ) -> tuple[CheckResult, str | None, tuple[str, ...]]:
     path = root / "data" / "new-api" / "one-api.db"
     channel_token = ""
+    raw_client_token = ""
     client_token = ""
     try:
         with sqlite3.connect(
@@ -166,11 +191,11 @@ def check_database(
         if integrity != ("ok",) or channel is None or client is None:
             raise ValueError("required database state is unavailable")
         channel_token = str(channel[0])
-        client_token = str(client[0])
+        raw_client_token = str(client[0])
         client_token = (
-            client_token
-            if client_token.startswith("sk-")
-            else f"sk-{client_token}"
+            raw_client_token
+            if raw_client_token.startswith("sk-")
+            else f"sk-{raw_client_token}"
         )
         remaining = token_refresh.jwt_exp(channel_token) - now
         status = (
@@ -199,7 +224,17 @@ def check_database(
                 },
             ),
             client_token,
-            (channel_token, client_token),
+            tuple(
+                dict.fromkeys(
+                    value
+                    for value in (
+                        channel_token,
+                        raw_client_token,
+                        client_token,
+                    )
+                    if value
+                )
+            ),
         )
     except (
         OSError,
@@ -209,7 +244,9 @@ def check_database(
         token_refresh.RefreshError,
     ):
         secrets = tuple(
-            value for value in (channel_token, client_token) if value
+            value
+            for value in (channel_token, raw_client_token, client_token)
+            if value
         )
         return (
             CheckResult(
@@ -247,17 +284,31 @@ def check_refresh_log(
             except json.JSONDecodeError:
                 invalid_lines += 1
                 continue
-            if isinstance(raw, dict):
-                record = {
-                    key: (
-                        safe_text(raw[key], secrets)
-                        if key == "reason"
-                        else raw[key]
-                    )
-                    for key in LOG_FIELDS
-                    if key in raw
-                }
-                records.append(record)
+            if not isinstance(raw, dict):
+                invalid_lines += 1
+                continue
+            event = raw.get("event")
+            record = {
+                "event": event
+                if isinstance(event, str) and event in KNOWN_REFRESH_EVENTS
+                else "unknown"
+            }
+            timestamp = raw.get("time")
+            if (
+                isinstance(timestamp, str)
+                and 0 < len(timestamp) <= 64
+                and "T" in timestamp
+            ):
+                try:
+                    if datetime.fromisoformat(timestamp).tzinfo is not None:
+                        record["time"] = timestamp
+                except ValueError:
+                    pass
+            for key in LOG_INTEGER_FIELDS:
+                value = raw.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    record[key] = value
+            records.append(record)
     except OSError:
         return CheckResult(
             "refresh_log",
@@ -273,17 +324,18 @@ def check_refresh_log(
             {"invalid_lines": invalid_lines},
         )
     latest = records[-1]
-    event = latest.get("event")
+    event = latest["event"]
     if event == "refresh_failed":
         status = "FAIL"
     elif event in {"refresh_skipped", "refresh_succeeded"}:
         status = "WARN" if invalid_lines else "PASS"
     else:
         status = "FAIL"
+    summary = "未知续期事件" if event == "unknown" else f"最新事件为 {event}"
     return CheckResult(
         "refresh_log",
         status,
-        f"最新事件为 {event or 'unknown'}",
+        summary,
         {**latest, "invalid_lines": invalid_lines},
     )
 

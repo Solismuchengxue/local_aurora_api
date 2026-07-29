@@ -192,6 +192,39 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertNotIn("secret", result.summary.lower())
 
+    def test_top_level_object_fails_without_raising(self):
+        run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"Name": "/aurora"}),
+                stderr="",
+            )
+        )
+        result = MODULE.check_containers(run)
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details["error"], "docker_inspect_error")
+
+    def test_malformed_state_fails_without_raising(self):
+        payload = [
+            {
+                "Name": "/aurora",
+                "State": "running",
+                "RestartCount": 0,
+            }
+        ]
+        run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+        )
+        result = MODULE.check_containers(run)
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details["error"], "docker_inspect_error")
+
 
 def make_token(exp: int, marker: str) -> str:
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
@@ -245,6 +278,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertEqual(client_token, "sk-client-token-value")
         self.assertIn(self.channel_token, secrets)
+        self.assertIn("client-token-value", secrets)
+        self.assertIn("sk-client-token-value", secrets)
         serialized = json.dumps(result.details)
         self.assertNotIn(self.channel_token, serialized)
         self.assertNotIn("client-token-value", serialized)
@@ -315,6 +350,57 @@ class RefreshLogTests(unittest.TestCase):
         )
         result = MODULE.check_refresh_log(self.root)
         self.assertEqual(result.status, "WARN")
+
+    def test_json_scalar_or_array_warns_when_valid_event_exists(self):
+        self.log.write_text(
+            '"scalar"\n'
+            + "[]\n"
+            + json.dumps(
+                {
+                    "time": "2026-07-29T04:17:01+0800",
+                    "event": "refresh_skipped",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = MODULE.check_refresh_log(self.root)
+        self.assertEqual(result.status, "WARN")
+        self.assertEqual(result.details["invalid_lines"], 2)
+
+    def test_unknown_and_untrusted_log_values_are_not_echoed(self):
+        secret = "known-secret"
+        unknown_event = "internal_failure"
+        invalid_time = "not-a-timestamp"
+        string_number = "123"
+        self.log.write_text(
+            json.dumps(
+                {
+                    "time": invalid_time,
+                    "event": unknown_event,
+                    "reason": f"request failed {secret}",
+                    "remaining_seconds": string_number,
+                    "channel_id": True,
+                    "previous_exp": string_number,
+                    "new_exp": True,
+                    "extension_seconds": string_number,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = MODULE.check_refresh_log(self.root, (secret,))
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.summary, "未知续期事件")
+        self.assertEqual(result.details["event"], "unknown")
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn(unknown_event, serialized)
+        self.assertNotIn(invalid_time, serialized)
+        self.assertNotIn(string_number, serialized)
+        self.assertNotIn("reason", result.details)
 
     def test_refresh_failed_fails_and_redacts_secret(self):
         secret = "known-secret"
