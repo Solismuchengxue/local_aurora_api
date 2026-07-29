@@ -13,6 +13,8 @@ import subprocess
 import sys
 import time
 from typing import Callable
+import urllib.error
+import urllib.request
 
 import refresh_chatgpt_access_token as token_refresh
 
@@ -40,6 +42,8 @@ LOG_INTEGER_FIELDS = {
     "new_exp",
     "extension_seconds",
 }
+EXPECTED_MODELS = {"gpt-5-6-pro", "gpt-5-6-thinking"}
+NEW_API_BASE = "http://127.0.0.1:3000"
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,221 @@ def run_command(
         text=True,
         timeout=timeout,
         check=False,
+    )
+
+
+def discover_mihomo_endpoints(
+    run: Callable[..., subprocess.CompletedProcess[str]] = run_command,
+) -> tuple[str, str]:
+    completed = run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            "mihomo",
+        ],
+        timeout=15,
+    )
+    address = completed.stdout.strip()
+    if (
+        completed.returncode != 0
+        or not address
+        or any(char not in "0123456789." for char in address)
+    ):
+        raise RuntimeError("mihomo_address_unavailable")
+    return f"http://{address}:9090", f"http://{address}:7890"
+
+
+def fetch_json_url(url: str, timeout: int = 20) -> dict[str, object]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.load(response)
+
+
+def fetch_text_via_proxy(
+    url: str,
+    proxy_url: str,
+    timeout: int = 30,
+) -> str:
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler(
+            {"http": proxy_url, "https": proxy_url}
+        )
+    )
+    with opener.open(url, timeout=timeout) as response:
+        return response.read(64 * 1024).decode("utf-8", "replace")
+
+
+def check_mihomo(
+    fetch_json: Callable[..., dict[str, object]] = fetch_json_url,
+    fetch_text: Callable[..., str] = fetch_text_via_proxy,
+    run: Callable[..., subprocess.CompletedProcess[str]] = run_command,
+) -> CheckResult:
+    try:
+        control_url, proxy_url = discover_mihomo_endpoints(run)
+        config = fetch_json(f"{control_url}/configs", timeout=20)
+        global_proxy = fetch_json(
+            f"{control_url}/proxies/GLOBAL",
+            timeout=20,
+        )
+        trace = fetch_text(
+            "https://www.cloudflare.com/cdn-cgi/trace",
+            proxy_url,
+            timeout=30,
+        )
+        values = dict(
+            line.split("=", 1)
+            for line in trace.splitlines()
+            if "=" in line
+        )
+        mode = str(config.get("mode", "")).upper()
+        selected = safe_text(global_proxy.get("now", ""), limit=120)
+        country = str(values.get("loc", "")).upper()
+        healthy = mode == "GLOBAL" and country == "SG"
+        return CheckResult(
+            "mihomo",
+            "PASS" if healthy else "FAIL",
+            (
+                f"GLOBAL / SG / {selected}"
+                if healthy
+                else "Mihomo 模式或代理出口不符合要求"
+            ),
+            {
+                "mode": mode,
+                "selected": selected,
+                "country": country,
+            },
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        urllib.error.URLError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return CheckResult(
+            "mihomo",
+            "FAIL",
+            "Mihomo 控制接口或代理出口检查失败",
+            {"error": "mihomo_check_failed"},
+        )
+
+
+def check_models(
+    client_token: str,
+    request: Callable[..., dict[str, object]] = (
+        token_refresh.request_json
+    ),
+) -> CheckResult:
+    try:
+        payload = request(
+            f"{NEW_API_BASE}/v1/models",
+            client_token,
+            timeout=30,
+        )
+        model_ids = sorted(
+            item.get("id")
+            for item in payload.get("data", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+        )
+        healthy = set(model_ids) == EXPECTED_MODELS
+        return CheckResult(
+            "models",
+            "PASS" if healthy else "FAIL",
+            (
+                "模型范围严格等于 pro、thinking"
+                if healthy
+                else "模型范围与正式配置不一致"
+            ),
+            {"model_ids": model_ids},
+        )
+    except (
+        AttributeError,
+        TypeError,
+        token_refresh.RefreshError,
+    ):
+        return CheckResult(
+            "models",
+            "FAIL",
+            "New API 模型检查失败",
+            {"error": "model_request_failed"},
+        )
+
+
+def check_chat(
+    client_token: str,
+    request: Callable[..., dict[str, object]] = (
+        token_refresh.request_json
+    ),
+) -> CheckResult:
+    failures = 0
+    for model in ("gpt-5-6-pro", "gpt-5-6-thinking"):
+        marker = f"AURORA-HEALTH-{time.time_ns()}"
+        try:
+            payload = request(
+                f"{NEW_API_BASE}/v1/chat/completions",
+                client_token,
+                payload={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"只回答：{marker}",
+                        }
+                    ],
+                    "stream": False,
+                },
+                timeout=180,
+            )
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or len(choices) != 1:
+                failures += 1
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                failures += 1
+                continue
+            message = choice.get("message")
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else None
+            )
+            if not isinstance(content, str):
+                failures += 1
+                continue
+            if model == "gpt-5-6-pro" and content:
+                status = "PASS"
+                summary = "pro 返回结构合法的非空 completion"
+            elif content:
+                status = "WARN"
+                summary = "pro 失败，thinking 返回结构合法 completion"
+            else:
+                status = "WARN"
+                summary = f"{model} 返回结构合法的空 completion"
+            return CheckResult(
+                "chat",
+                status,
+                summary,
+                {
+                    "model": model,
+                    "content_empty": not bool(content),
+                    "fallback_used": model == "gpt-5-6-thinking",
+                },
+            )
+        except (
+            AttributeError,
+            TypeError,
+            token_refresh.RefreshError,
+        ):
+            failures += 1
+    return CheckResult(
+        "chat",
+        "FAIL",
+        "pro 与 thinking 聊天检查均失败",
+        {"attempts_failed": failures},
     )
 
 

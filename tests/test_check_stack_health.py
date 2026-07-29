@@ -420,5 +420,133 @@ class RefreshLogTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(result.details))
 
 
+class MihomoTests(unittest.TestCase):
+    def test_global_mode_and_sg_exit_pass(self):
+        fetch_json = mock.Mock(
+            side_effect=[
+                {"mode": "global"},
+                {"now": "Singapore Node"},
+            ]
+        )
+        fetch_text = mock.Mock(return_value="ip=203.0.113.1\nloc=SG\n")
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            result = MODULE.check_mihomo(fetch_json, fetch_text)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.details["mode"], "GLOBAL")
+        self.assertEqual(result.details["country"], "SG")
+
+    def test_non_global_or_non_sg_fails(self):
+        fetch_json = mock.Mock(
+            side_effect=[
+                {"mode": "rule"},
+                {"now": "Other Node"},
+            ]
+        )
+        fetch_text = mock.Mock(return_value="loc=US\n")
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            result = MODULE.check_mihomo(fetch_json, fetch_text)
+        self.assertEqual(result.status, "FAIL")
+
+
+class ModelTests(unittest.TestCase):
+    def test_exact_models_pass(self):
+        request = mock.Mock(
+            return_value={
+                "data": [
+                    {"id": "gpt-5-6-thinking"},
+                    {"id": "gpt-5-6-pro"},
+                ]
+            }
+        )
+        result = MODULE.check_models("client-secret", request)
+        self.assertEqual(result.status, "PASS")
+
+    def test_extra_or_missing_model_fails(self):
+        request = mock.Mock(
+            return_value={
+                "data": [
+                    {"id": "gpt-5-6-pro"},
+                    {"id": "gpt-image-2"},
+                ]
+            }
+        )
+        result = MODULE.check_models("client-secret", request)
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(
+            result.details["model_ids"],
+            ["gpt-5-6-pro", "gpt-image-2"],
+        )
+
+
+class ChatTests(unittest.TestCase):
+    def test_nonempty_pro_completion_passes(self):
+        request = mock.Mock(
+            return_value={
+                "choices": [
+                    {"message": {"content": "OK"}, "finish_reason": "stop"}
+                ]
+            }
+        )
+        result = MODULE.check_chat("client-secret", request)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.details["model"], "gpt-5-6-pro")
+
+    def test_empty_completion_warns(self):
+        request = mock.Mock(
+            return_value={
+                "choices": [
+                    {"message": {"content": ""}, "finish_reason": "stop"}
+                ]
+            }
+        )
+        result = MODULE.check_chat("client-secret", request)
+        self.assertEqual(result.status, "WARN")
+        self.assertNotIn("content", result.details)
+
+    def test_thinking_fallback_warns(self):
+        request = mock.Mock(
+            side_effect=[
+                MODULE.token_refresh.RefreshError("pro failed"),
+                {
+                    "choices": [
+                        {
+                            "message": {"content": "OK"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            ]
+        )
+        result = MODULE.check_chat("client-secret", request)
+        self.assertEqual(result.status, "WARN")
+        self.assertEqual(result.details["model"], "gpt-5-6-thinking")
+
+    def test_both_models_fail_without_leaking_token(self):
+        secret = "client-secret"
+        request = mock.Mock(
+            side_effect=MODULE.token_refresh.RefreshError(
+                f"request failed {secret}"
+            )
+        )
+        result = MODULE.check_chat(secret, request)
+        self.assertEqual(result.status, "FAIL")
+        self.assertNotIn(secret, json.dumps(result.details))
+        self.assertNotIn(secret, result.summary)
+
+
 if __name__ == "__main__":
     unittest.main()
