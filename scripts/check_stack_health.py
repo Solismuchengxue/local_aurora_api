@@ -660,3 +660,79 @@ def render_human(report: dict[str, object]) -> str:
     lines.append("")
     lines.append(f"总体：{STATUS_LABELS[str(report['overall'])]}")
     return "\n".join(lines)
+
+
+def dependency_failure(name: str, dependency: str) -> CheckResult:
+    return CheckResult(
+        name,
+        "FAIL",
+        f"缺少前置检查：{dependency}",
+        {"error": "dependency_failed", "dependency": dependency},
+    )
+
+
+def run_health_check(
+    root: Path,
+    channel_id: int,
+    now: int | None = None,
+) -> dict[str, object]:
+    checked_epoch = int(time.time()) if now is None else now
+    checked_at = datetime.fromtimestamp(
+        checked_epoch
+    ).astimezone().isoformat(timespec="seconds")
+    containers = check_containers()
+    database, client_token, secrets = check_database(
+        root,
+        channel_id,
+        checked_epoch,
+    )
+    refresh_log = check_refresh_log(root, secrets)
+    mihomo = check_mihomo()
+    if client_token is None:
+        models = dependency_failure("models", "database")
+        chat = dependency_failure("chat", "database")
+    else:
+        models = check_models(client_token)
+        chat = check_chat(client_token)
+    return build_report(
+        [
+            containers,
+            database,
+            refresh_log,
+            mihomo,
+            models,
+            chat,
+        ],
+        checked_at,
+        secrets=secrets,
+    )
+
+
+def parse_args(
+    argv: list[str] | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="只读检查 local_aurora_api 运行状态"
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+    )
+    parser.add_argument("--channel-id", type=int, default=1)
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    report = run_health_check(
+        args.root.resolve(),
+        args.channel_id,
+    )
+    print(render_json(report) if args.json else render_human(report))
+    return 1 if report["overall"] == "FAIL" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

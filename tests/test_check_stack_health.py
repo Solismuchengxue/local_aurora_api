@@ -671,5 +671,104 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn(secret, result.summary)
 
 
+class CliTests(unittest.TestCase):
+    def test_run_health_check_collects_all_six_checks(self):
+        secret = "client-secret"
+
+        def pass_result(name: str) -> MODULE.CheckResult:
+            return MODULE.CheckResult(
+                name,
+                "PASS",
+                f"ok {secret}",
+                {"nested": {"secret": secret}},
+            )
+
+        with (
+            mock.patch.object(
+                MODULE,
+                "check_containers",
+                return_value=pass_result("containers"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_database",
+                return_value=(
+                    pass_result("database"),
+                    secret,
+                    ("channel-secret", secret),
+                ),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_refresh_log",
+                return_value=pass_result("refresh_log"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_mihomo",
+                return_value=pass_result("mihomo"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_models",
+                return_value=pass_result("models"),
+            ),
+            mock.patch.object(
+                MODULE,
+                "check_chat",
+                return_value=pass_result("chat"),
+            ),
+        ):
+            report = MODULE.run_health_check(
+                Path("/example"),
+                1,
+                now=1_700_000_000,
+            )
+        self.assertEqual(
+            [item["name"] for item in report["checks"]],
+            [
+                "containers",
+                "database",
+                "refresh_log",
+                "mihomo",
+                "models",
+                "chat",
+            ],
+        )
+        serialized = json.dumps(report)
+        self.assertNotIn("channel-secret", serialized)
+        self.assertNotIn(secret, serialized)
+
+    def test_main_json_output_and_exit_codes(self):
+        report = {
+            "checked_at": "2026-07-29T12:00:00+08:00",
+            "overall": "FAIL",
+            "checks": [],
+        }
+        with mock.patch.object(
+            MODULE,
+            "run_health_check",
+            return_value=report,
+        ):
+            with mock.patch("builtins.print") as output:
+                exit_code = MODULE.main(["--json"])
+        self.assertEqual(exit_code, 1)
+        json.loads(output.call_args.args[0])
+
+    def test_main_warn_returns_zero(self):
+        report = {
+            "checked_at": "2026-07-29T12:00:00+08:00",
+            "overall": "WARN",
+            "checks": [],
+        }
+        with mock.patch.object(
+            MODULE,
+            "run_health_check",
+            return_value=report,
+        ):
+            exit_code = MODULE.main([])
+        self.assertEqual(exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -369,21 +369,43 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 - Aurora 自带的账号池在当前镜像上实测存在路径、权限和账号可用性问题，因此这里不挂载任何 token 文件。
 - 脚本只支持项目默认的 `data/new-api/one-api.db`；改用 MySQL 或 PostgreSQL 后不要启用此 cron。
 
-### 11.2 mihomo 保持 GLOBAL 模式
+### 11.2 一键只读健康检查
+
+在项目根目录运行：
+
+```bash
+python3 scripts/check_stack_health.py
+python3 scripts/check_stack_health.py --json
+```
+
+检查范围包括：
+
+- 四个生产容器均为 running 且重启次数为 0；
+- New API SQLite 完整性、渠道 Token 剩余时间和可用客户端令牌；
+- 最新定时续期事件；
+- Mihomo GLOBAL 模式、当前节点和经代理确认的 `SG` 出口；
+- 对外模型严格等于 `gpt-5-6-pro`、`gpt-5-6-thinking`；
+- 一次真实 New API 聊天请求及 OpenAI completion 结构。
+
+只有通过或警告时退出码为 `0`；任一失败项使退出码为 `1`。合法 HTTP 200 空 completion 会显示警告，但不会被误判为鉴权失败。
+
+脚本不会修改数据库、Token、容器、节点选择或配置，也不会输出凭据和聊天正文。
+
+### 11.3 mihomo 保持 GLOBAL 模式
 
 在 Mihomo WebUI 中确认出站模式为 `GLOBAL`、GLOBAL 首选节点为新加坡解锁节点（见 §6.1）。切换到 `rule` 可能让 Aurora 改走其他节点。每次更新订阅后重新确认模式和节点选择。
 
-### 11.3 不影响飞牛 IPv6 DDNS
+### 11.4 不影响飞牛 IPv6 DDNS
 
 当前设计不启用 Mihomo TUN，并且只有 Aurora 配置 `http_proxy`，因此不会主动接管飞牛系统路由。部署后仍应实际验证 IPv6 DDNS 和防火墙行为。
 
-### 11.4 Mihomo 端口边界
+### 11.5 Mihomo 端口边界
 
 Mihomo 的 `7890` 代理端口不发布到 NAS，只供 Compose 网络内的 Aurora 使用。`9090` 控制端口没有默认认证，但只绑定 `.env` 中的 `NAS_LAN_IP`，不会监听 NAS 的 IPv6 地址或其他 IPv4 网卡。
 
 这项绑定不能替代边界防火墙：仍应确认路由器没有把 `9090` 转发到公网，并避免把 `NAS_LAN_IP` 设置成 `0.0.0.0`。
 
-### 11.5 排障速查
+### 11.6 排障速查
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
