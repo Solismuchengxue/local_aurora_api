@@ -2,7 +2,8 @@
 
 > 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录已于 2026-07-29 在确认无运行引用后删除；已校验的冷备份迁入 `backups/legacy/`。2026-07-29 又完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换，本轮只验证容器、Compose 标签、挂载、cron 和本地端口，未调用真实聊天。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
-> 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录暂时保留用于观察和回退，退役需要单独批准。
+> 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
+> 脱敏健康状态接入 n8n 的工作推迟到改革部全部迁移完成后再单独评审和批准；当前部署不依赖 n8n。
 
 ---
 
