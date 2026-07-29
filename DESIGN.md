@@ -97,6 +97,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 - 2026-07-26 的 NAS 只读复验确认：旧部署目录中的 Compose 可以解析，四个目标容器均在运行，Mihomo 保持 GLOBAL 模式且出口国家为新加坡，New API 鉴权后的模型列表包含两个聊天模型。
 - 2026-07-27 已完成到 `local_aurora_api` 的受控切换；四个容器的 Compose 工作目录和持久化挂载均指向新结构，GLOBAL、新加坡出口、模型列表和最小聊天请求均验证通过。
+- 2026-07-29 已完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换；四个容器、两处持久化挂载和用户 cron 均使用新路径，本地端口 4/4 通过。该次路径切换没有复验代理出口、模型或真实聊天，历史路径暂时保留用于观察和回退。
 - 首次切换曾通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token；该挂载不再作为定时续期的正式依赖。
 - session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法稳定使用 session/access-token 账号池，因此采用外部定时脚本更新 New API 的 SQLite 渠道记录。
 - 旧目录 `aurora-stack` 已于 2026-07-29 在确认无容器、cron 或进程引用后删除；已校验的冷备份迁入 `backups/legacy/`，用于必要时回滚。
