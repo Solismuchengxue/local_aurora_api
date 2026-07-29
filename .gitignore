@@ -15,3 +15,6 @@
 # Python 运行缓存
 __pycache__/
 *.pyc
+
+# 本地 Git 工作树
+/.worktrees/
