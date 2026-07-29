@@ -1,4 +1,5 @@
 import base64
+import http.client
 import importlib.util
 import json
 from pathlib import Path
@@ -138,53 +139,46 @@ class ResultTests(unittest.TestCase):
 
 class ContainerTests(unittest.TestCase):
     def test_all_expected_containers_are_running_without_restarts(self):
-        payload = [
-            {
-                "Name": "/aurora",
-                "State": {"Status": "running"},
-                "RestartCount": 0,
-            },
-            {
-                "Name": "/new-api",
-                "State": {"Status": "running"},
-                "RestartCount": 0,
-            },
-            {
-                "Name": "/mihomo",
-                "State": {"Status": "running"},
-                "RestartCount": 0,
-            },
-            {
-                "Name": "/metacubexd",
-                "State": {"Status": "running"},
-                "RestartCount": 0,
-            },
-        ]
+        projected = "\n".join(
+            [
+                "/aurora\trunning\t0",
+                "/new-api\trunning\t0",
+                "/mihomo\trunning\t0",
+                "/metacubexd\trunning\t0",
+            ]
+        )
         run = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps(payload),
-                stderr="",
+                stdout=projected,
+                stderr="sensitive diagnostic must be ignored",
             )
         )
         result = MODULE.check_containers(run)
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.details["running"], 4)
+        run.assert_called_once_with(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.Name}}\t{{.State.Status}}\t{{.RestartCount}}",
+                "aurora",
+                "new-api",
+                "mihomo",
+                "metacubexd",
+            ],
+            timeout=20,
+        )
+        self.assertNotIn("sensitive diagnostic", json.dumps(result.details))
 
     def test_stopped_or_restarted_container_fails(self):
-        payload = [
-            {
-                "Name": "/aurora",
-                "State": {"Status": "exited"},
-                "RestartCount": 1,
-            }
-        ]
         run = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps(payload),
+                stdout="/aurora\texited\t1",
                 stderr="",
             )
         )
@@ -197,7 +191,7 @@ class ContainerTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps({"Name": "/aurora"}),
+                stdout='{"Name": "/aurora"}',
                 stderr="",
             )
         )
@@ -206,18 +200,11 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(result.details["error"], "docker_inspect_error")
 
     def test_malformed_state_fails_without_raising(self):
-        payload = [
-            {
-                "Name": "/aurora",
-                "State": "running",
-                "RestartCount": 0,
-            }
-        ]
         run = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps(payload),
+                stdout="/aurora\trunning\tnot-an-integer",
                 stderr="",
             )
         )
@@ -305,6 +292,71 @@ class DatabaseTests(unittest.TestCase):
         result, _, _ = MODULE.check_database(self.root, 1, self.now)
         self.assertEqual(result.status, "FAIL")
 
+    def assert_invalid_client_token(self, value):
+        with sqlite3.connect(self.database) as database:
+            database.execute(
+                "UPDATE tokens SET key = ? WHERE id = 1",
+                (value,),
+            )
+        result, client_token, secrets = MODULE.check_database(
+            self.root,
+            1,
+            self.now,
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIsNone(client_token)
+        self.assertEqual(secrets, (self.channel_token,))
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertNotIn("sk-None", serialized)
+        self.assertNotIn('"sk-"', serialized)
+
+    def test_null_client_token_fails_without_normalizing_it(self):
+        self.assert_invalid_client_token(None)
+
+    def test_empty_client_token_fails_without_normalizing_it(self):
+        self.assert_invalid_client_token("")
+
+    def test_non_string_client_token_fails_without_normalizing_it(self):
+        self.assert_invalid_client_token(sqlite3.Binary(b"binary-client-token"))
+
+    def test_integrity_check_failure_blocks_tokens(self):
+        real_database = sqlite3.connect(self.database)
+
+        class IntegrityFailureConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                real_database.close()
+
+            def execute(self, statement, parameters=()):
+                if statement == "PRAGMA integrity_check":
+                    cursor = mock.Mock()
+                    cursor.fetchone.return_value = ("database malformed",)
+                    return cursor
+                return real_database.execute(statement, parameters)
+
+        with mock.patch.object(
+            MODULE.sqlite3,
+            "connect",
+            return_value=IntegrityFailureConnection(),
+        ):
+            result, client_token, secrets = MODULE.check_database(
+                self.root,
+                1,
+                self.now,
+            )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertIsNone(client_token)
+        self.assertEqual(secrets, ())
+        self.assertEqual(
+            result.details,
+            {"error": "database_state_invalid"},
+        )
+
 
 class RefreshLogTests(unittest.TestCase):
     def setUp(self):
@@ -319,6 +371,23 @@ class RefreshLogTests(unittest.TestCase):
     def test_missing_log_warns(self):
         result = MODULE.check_refresh_log(self.root)
         self.assertEqual(result.status, "WARN")
+
+    def test_log_stat_race_returns_fixed_failure(self):
+        with (
+            mock.patch.object(MODULE.Path, "exists", return_value=True),
+            mock.patch.object(
+                MODULE.Path,
+                "stat",
+                side_effect=PermissionError("sensitive filesystem detail"),
+            ),
+        ):
+            result = MODULE.check_refresh_log(self.root)
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(
+            result.details,
+            {"error": "refresh_log_read_failed"},
+        )
+        self.assertNotIn("sensitive filesystem detail", result.summary)
 
     def test_latest_successful_event_passes(self):
         self.log.write_text(
@@ -421,6 +490,20 @@ class RefreshLogTests(unittest.TestCase):
 
 
 class MihomoTests(unittest.TestCase):
+    def run_check(self, config, global_proxy, trace):
+        with mock.patch.object(
+            MODULE,
+            "discover_mihomo_endpoints",
+            return_value=(
+                "http://172.19.0.3:9090",
+                "http://172.19.0.3:7890",
+            ),
+        ):
+            return MODULE.check_mihomo(
+                mock.Mock(side_effect=[config, global_proxy]),
+                mock.Mock(return_value=trace),
+            )
+
     def test_global_mode_and_sg_exit_pass(self):
         fetch_json = mock.Mock(
             side_effect=[
@@ -522,6 +605,114 @@ class MihomoTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertEqual(result.details, {"error": "mihomo_check_failed"})
 
+    def test_external_fields_must_be_bounded_strings(self):
+        raw_fragment = "UNTRUSTED-FRAGMENT"
+        cases = [
+            (
+                {"mode": {"nested": raw_fragment}},
+                {"now": "Singapore Node"},
+                "loc=SG\n",
+            ),
+            (
+                {"mode": "global"},
+                {"now": {"nested": raw_fragment}},
+                "loc=SG\n",
+            ),
+            (
+                {"mode": "global"},
+                {"now": raw_fragment * 20},
+                "loc=SG\n",
+            ),
+            (
+                {"mode": "global"},
+                {"now": "Singapore Node"},
+                f"loc={raw_fragment * 20}\n",
+            ),
+        ]
+        for config, global_proxy, trace in cases:
+            with self.subTest(
+                config=config,
+                global_proxy=global_proxy,
+                trace_length=len(trace),
+            ):
+                result = self.run_check(config, global_proxy, trace)
+                serialized = json.dumps(
+                    {"summary": result.summary, "details": result.details}
+                )
+                self.assertEqual(result.status, "FAIL")
+                self.assertEqual(
+                    result.details,
+                    {"error": "mihomo_check_failed"},
+                )
+                self.assertNotIn(raw_fragment, serialized)
+
+    def test_control_incomplete_read_returns_fixed_failure(self):
+        raw_fragment = b"partial-control-fragment"
+        response = mock.MagicMock()
+        response.read.side_effect = http.client.IncompleteRead(
+            raw_fragment,
+            20,
+        )
+        urlopen = mock.MagicMock()
+        urlopen.return_value.__enter__.return_value = response
+        with (
+            mock.patch.object(
+                MODULE,
+                "discover_mihomo_endpoints",
+                return_value=(
+                    "http://172.19.0.3:9090",
+                    "http://172.19.0.3:7890",
+                ),
+            ),
+            mock.patch.object(MODULE.urllib.request, "urlopen", urlopen),
+        ):
+            result = MODULE.check_mihomo()
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+        self.assertNotIn(raw_fragment.decode(), serialized)
+
+    def test_proxy_incomplete_read_returns_fixed_failure(self):
+        raw_fragment = b"partial-proxy-fragment"
+        response = mock.MagicMock()
+        response.read.side_effect = http.client.IncompleteRead(
+            raw_fragment,
+            20,
+        )
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        with (
+            mock.patch.object(
+                MODULE,
+                "discover_mihomo_endpoints",
+                return_value=(
+                    "http://172.19.0.3:9090",
+                    "http://172.19.0.3:7890",
+                ),
+            ),
+            mock.patch.object(
+                MODULE.urllib.request,
+                "build_opener",
+                return_value=opener,
+            ),
+        ):
+            result = MODULE.check_mihomo(
+                mock.Mock(
+                    side_effect=[
+                        {"mode": "global"},
+                        {"now": "Singapore Node"},
+                    ]
+                )
+            )
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"error": "mihomo_check_failed"})
+        self.assertNotIn(raw_fragment.decode(), serialized)
+
 
 class StrictHttpTests(unittest.TestCase):
     def make_urlopen(self, status, body):
@@ -565,6 +756,25 @@ class StrictHttpTests(unittest.TestCase):
                     "http://127.0.0.1:3000/v1/models",
                     "client-secret",
                 )
+
+    def test_request_json_200_translates_incomplete_read(self):
+        raw_fragment = b"partial-api-fragment"
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.side_effect = http.client.IncompleteRead(
+            raw_fragment,
+            20,
+        )
+        urlopen = mock.MagicMock()
+        urlopen.return_value.__enter__.return_value = response
+        with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
+            with self.assertRaises(MODULE.token_refresh.RefreshError) as error:
+                MODULE.request_json_200(
+                    "http://127.0.0.1:3000/v1/models",
+                    "client-secret",
+                )
+        self.assertEqual(str(error.exception), "health API request failed")
+        self.assertNotIn(raw_fragment.decode(), str(error.exception))
 
     def test_default_chat_request_rejects_created_completion(self):
         urlopen = self.make_urlopen(
@@ -613,6 +823,66 @@ class ModelTests(unittest.TestCase):
             result.details["model_ids"],
             ["gpt-5-6-pro", "gpt-image-2"],
         )
+
+    def test_malformed_or_oversized_model_ids_return_fixed_failure(self):
+        raw_fragment = "UNTRUSTED-MODEL-FRAGMENT"
+        cases = [
+            {"data": {"nested": raw_fragment}},
+            {"data": [{"id": {"nested": raw_fragment}}]},
+            {"data": [{"id": raw_fragment * 20}]},
+            {"data": [{"id": f"model/{raw_fragment}"}]},
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                result = MODULE.check_models(
+                    "client-secret",
+                    mock.Mock(return_value=payload),
+                )
+                serialized = json.dumps(
+                    {"summary": result.summary, "details": result.details}
+                )
+                self.assertEqual(result.status, "FAIL")
+                self.assertEqual(
+                    result.details,
+                    {"error": "model_response_invalid"},
+                )
+                self.assertNotIn(raw_fragment, serialized)
+
+    def test_excessive_model_list_returns_fixed_failure(self):
+        payload = {
+            "data": [
+                {"id": f"model-{index}"}
+                for index in range(65)
+            ]
+        }
+        result = MODULE.check_models(
+            "client-secret",
+            mock.Mock(return_value=payload),
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(
+            result.details,
+            {"error": "model_response_invalid"},
+        )
+        self.assertNotIn("model-64", json.dumps(result.details))
+
+    def test_incomplete_read_returns_fixed_failure(self):
+        raw_fragment = b"partial-model-fragment"
+        result = MODULE.check_models(
+            "client-secret",
+            mock.Mock(
+                side_effect=http.client.IncompleteRead(raw_fragment, 20)
+            ),
+        )
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(
+            result.details,
+            {"error": "model_request_failed"},
+        )
+        self.assertNotIn(raw_fragment.decode(), serialized)
 
 
 class ChatTests(unittest.TestCase):
@@ -669,6 +939,21 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertNotIn(secret, json.dumps(result.details))
         self.assertNotIn(secret, result.summary)
+
+    def test_incomplete_read_returns_fixed_failure(self):
+        raw_fragment = b"partial-chat-fragment"
+        result = MODULE.check_chat(
+            "client-secret",
+            mock.Mock(
+                side_effect=http.client.IncompleteRead(raw_fragment, 20)
+            ),
+        )
+        serialized = json.dumps(
+            {"summary": result.summary, "details": result.details}
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.details, {"attempts_failed": 2})
+        self.assertNotIn(raw_fragment.decode(), serialized)
 
 
 class CliTests(unittest.TestCase):

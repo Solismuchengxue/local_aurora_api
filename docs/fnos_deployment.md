@@ -376,6 +376,30 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 ```bash
 python3 scripts/check_stack_health.py
 python3 scripts/check_stack_health.py --json
+python3 scripts/check_stack_health.py \
+  --root /path/to/local_aurora_api \
+  --channel-id 1 \
+  --json
+```
+
+`--root` 指定包含 `data/` 与 `.secrets/` 的项目根目录，默认使用脚本所在项目；
+`--channel-id` 指定要检查的已启用 Aurora 渠道 ID，默认值为 `1`。
+
+精简 JSON 输出示例（仅含安全的示意状态字段，不包含 Token、响应正文或错误原文）：
+
+```json
+{
+  "checked_at": "2026-07-29T12:00:00+08:00",
+  "overall": "PASS",
+  "checks": [
+    {"name": "containers", "status": "PASS", "summary": "4/4 运行，重启次数均为 0", "details": {"running": 4}},
+    {"name": "database", "status": "PASS", "summary": "数据库完整，Token 剩余 168 小时", "details": {"integrity": "ok"}},
+    {"name": "refresh_log", "status": "PASS", "summary": "最新事件为 refresh_skipped", "details": {"event": "refresh_skipped", "invalid_lines": 0}},
+    {"name": "mihomo", "status": "PASS", "summary": "GLOBAL / SG / Singapore Node", "details": {"mode": "GLOBAL", "selected": "Singapore Node", "country": "SG"}},
+    {"name": "models", "status": "PASS", "summary": "模型范围严格等于 pro、thinking", "details": {"model_ids": ["gpt-5-6-pro", "gpt-5-6-thinking"]}},
+    {"name": "chat", "status": "PASS", "summary": "pro 返回结构合法的非空 completion", "details": {"model": "gpt-5-6-pro", "content_empty": false, "fallback_used": false}}
+  ]
+}
 ```
 
 检查范围包括：

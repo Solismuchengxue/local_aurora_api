@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import http.client
 import json
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -44,6 +46,20 @@ LOG_INTEGER_FIELDS = {
 }
 EXPECTED_MODELS = {"gpt-5-6-pro", "gpt-5-6-thinking"}
 NEW_API_BASE = "http://127.0.0.1:3000"
+CONTAINER_INSPECT_FORMAT = (
+    "{{.Name}}\t{{.State.Status}}\t{{.RestartCount}}"
+)
+CONTAINER_STATES = {
+    "created",
+    "running",
+    "paused",
+    "restarting",
+    "removing",
+    "exited",
+    "dead",
+}
+MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+MAX_MODEL_COUNT = 64
 
 
 @dataclass(frozen=True)
@@ -76,7 +92,8 @@ def run_command(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
         timeout=timeout,
         check=False,
@@ -150,7 +167,12 @@ def request_json_200(
         raise token_refresh.RefreshError(
             "health API request returned non-200 status"
         ) from exc
-    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+    except (
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+    ) as exc:
         raise token_refresh.RefreshError("health API request failed") from exc
     if status != 200:
         raise token_refresh.RefreshError(
@@ -190,14 +212,36 @@ def check_mihomo(
         )
         if not isinstance(trace, str):
             raise ValueError("mihomo_trace_invalid")
+        raw_mode = config.get("mode")
+        raw_selected = global_proxy.get("now")
+        if (
+            not isinstance(raw_mode, str)
+            or not 0 < len(raw_mode) <= 16
+            or not raw_mode.isascii()
+            or not raw_mode.isalpha()
+            or not isinstance(raw_selected, str)
+            or not 0 < len(raw_selected) <= 120
+            or not raw_selected.strip()
+            or not raw_selected.isprintable()
+            or len(trace) > 64 * 1024
+        ):
+            raise ValueError("mihomo_fields_invalid")
         values = dict(
             line.split("=", 1)
             for line in trace.splitlines()
             if "=" in line
         )
-        mode = str(config.get("mode", "")).upper()
-        selected = safe_text(global_proxy.get("now", ""), limit=120)
-        country = str(values.get("loc", "")).upper()
+        raw_country = values.get("loc")
+        if (
+            not isinstance(raw_country, str)
+            or len(raw_country) != 2
+            or not raw_country.isascii()
+            or not raw_country.isalpha()
+        ):
+            raise ValueError("mihomo_country_invalid")
+        mode = raw_mode.upper()
+        selected = raw_selected
+        country = raw_country.upper()
         healthy = mode == "GLOBAL" and country == "SG"
         return CheckResult(
             "mihomo",
@@ -219,6 +263,7 @@ def check_mihomo(
         subprocess.SubprocessError,
         TimeoutError,
         urllib.error.URLError,
+        http.client.HTTPException,
         ValueError,
         json.JSONDecodeError,
     ):
@@ -240,12 +285,34 @@ def check_models(
             client_token,
             timeout=30,
         )
-        model_ids = sorted(
-            item.get("id")
-            for item in payload.get("data", [])
-            if isinstance(item, dict)
-            and isinstance(item.get("id"), str)
+    except (
+        AttributeError,
+        TypeError,
+        token_refresh.RefreshError,
+        http.client.HTTPException,
+    ):
+        return CheckResult(
+            "models",
+            "FAIL",
+            "New API 模型检查失败",
+            {"error": "model_request_failed"},
         )
+    try:
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) > MAX_MODEL_COUNT:
+            raise ValueError("model_list_invalid")
+        model_ids = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError("model_item_invalid")
+            model_id = item.get("id")
+            if (
+                not isinstance(model_id, str)
+                or MODEL_ID_PATTERN.fullmatch(model_id) is None
+            ):
+                raise ValueError("model_id_invalid")
+            model_ids.append(model_id)
+        model_ids.sort()
         healthy = set(model_ids) == EXPECTED_MODELS
         return CheckResult(
             "models",
@@ -257,16 +324,12 @@ def check_models(
             ),
             {"model_ids": model_ids},
         )
-    except (
-        AttributeError,
-        TypeError,
-        token_refresh.RefreshError,
-    ):
+    except (AttributeError, TypeError, ValueError):
         return CheckResult(
             "models",
             "FAIL",
-            "New API 模型检查失败",
-            {"error": "model_request_failed"},
+            "New API 模型响应格式无效",
+            {"error": "model_response_invalid"},
         )
 
 
@@ -333,6 +396,7 @@ def check_chat(
             AttributeError,
             TypeError,
             token_refresh.RefreshError,
+            http.client.HTTPException,
         ):
             failures += 1
     return CheckResult(
@@ -348,7 +412,13 @@ def check_containers(
 ) -> CheckResult:
     try:
         completed = run(
-            ["docker", "inspect", *EXPECTED_CONTAINERS],
+            [
+                "docker",
+                "inspect",
+                "--format",
+                CONTAINER_INSPECT_FORMAT,
+                *EXPECTED_CONTAINERS,
+            ],
             timeout=20,
         )
         if completed.returncode != 0:
@@ -358,30 +428,30 @@ def check_containers(
                 "无法读取预期容器状态",
                 {"error": "docker_inspect_failed"},
             )
-        inspected = json.loads(completed.stdout)
-        if not isinstance(inspected, list):
-            raise ValueError("docker inspect output was not a list")
         states = {}
-        for item in inspected:
-            if not isinstance(item, dict):
-                raise ValueError("docker inspect item was not an object")
-            raw_name = item.get("Name")
-            if not isinstance(raw_name, str):
-                raise ValueError("docker inspect name was invalid")
-            name = raw_name.lstrip("/")
-            if name not in EXPECTED_CONTAINERS:
-                continue
-            state = item.get("State")
-            restart_count = item.get("RestartCount")
+        for line in completed.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3:
+                raise ValueError("docker inspect record was malformed")
+            raw_name, state, restart_text = fields
             if (
-                not isinstance(state, dict)
-                or not isinstance(state.get("Status"), str)
-                or not isinstance(restart_count, int)
-                or isinstance(restart_count, bool)
+                not raw_name.startswith("/")
+                or raw_name.count("/") != 1
+                or state not in CONTAINER_STATES
+                or not 0 < len(restart_text) <= 10
+                or not restart_text.isascii()
+                or not restart_text.isdecimal()
             ):
-                raise ValueError("docker inspect state was invalid")
+                raise ValueError("docker inspect record was invalid")
+            name = raw_name[1:]
+            if (
+                name not in EXPECTED_CONTAINERS
+                or name in states
+            ):
+                raise ValueError("docker inspect name was invalid")
+            restart_count = int(restart_text)
             states[name] = {
-                "state": state["Status"],
+                "state": state,
                 "restart_count": restart_count,
             }
         healthy = (
@@ -411,7 +481,8 @@ def check_containers(
     except (
         OSError,
         subprocess.SubprocessError,
-        json.JSONDecodeError,
+        AttributeError,
+        TypeError,
         ValueError,
     ):
         return CheckResult(
@@ -455,7 +526,13 @@ def check_database(
         if integrity != ("ok",) or channel is None or client is None:
             raise ValueError("required database state is unavailable")
         channel_token = str(channel[0])
-        raw_client_token = str(client[0])
+        stored_client_token = client[0]
+        if (
+            not isinstance(stored_client_token, str)
+            or not stored_client_token
+        ):
+            raise ValueError("client token is invalid")
+        raw_client_token = stored_client_token
         client_token = (
             raw_client_token
             if raw_client_token.startswith("sk-")
@@ -529,16 +606,16 @@ def check_refresh_log(
     secrets: tuple[str, ...] = (),
 ) -> CheckResult:
     path = root / ".secrets" / "token-refresh.log"
-    if not path.exists() or path.stat().st_size == 0:
-        return CheckResult(
-            "refresh_log",
-            "WARN",
-            "续期日志尚不存在或为空",
-            {"event": None},
-        )
     records = []
     invalid_lines = 0
     try:
+        if not path.exists() or path.stat().st_size == 0:
+            return CheckResult(
+                "refresh_log",
+                "WARN",
+                "续期日志尚不存在或为空",
+                {"event": None},
+            )
         for line in path.read_text(
             encoding="utf-8",
             errors="replace",
