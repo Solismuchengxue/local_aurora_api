@@ -18,6 +18,47 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ResultTests(unittest.TestCase):
+    def test_build_report_preserves_detail_keys_when_redacting_values(self):
+        first_secret = "first-secret"
+        second_secret = "second-secret"
+        first_key = f"credential-{first_secret}"
+        second_key = f"credential-{second_secret}"
+        report = MODULE.build_report(
+            [
+                MODULE.CheckResult(
+                    "containers",
+                    "PASS",
+                    "ok",
+                    {first_key: first_secret, second_key: second_secret},
+                )
+            ],
+            "2026-07-29T12:00:00+08:00",
+            secrets=(first_secret, second_secret),
+        )
+
+        details = report["checks"][0]["details"]
+        self.assertEqual(set(details), {first_key, second_key})
+        self.assertEqual(details[first_key], "[redacted]")
+        self.assertEqual(details[second_key], "[redacted]")
+
+    def test_build_report_preserves_long_text_without_secrets(self):
+        value = "x" * 241 + "\nunchanged"
+        report = MODULE.build_report(
+            [
+                MODULE.CheckResult(
+                    "containers",
+                    "PASS",
+                    value,
+                    {"message": value},
+                )
+            ],
+            "2026-07-29T12:00:00+08:00",
+        )
+
+        check = report["checks"][0]
+        self.assertEqual(check["summary"], value)
+        self.assertEqual(check["details"]["message"], value)
+
     def test_check_result_rejects_unknown_status(self):
         with self.assertRaises(ValueError) as error:
             MODULE.CheckResult("unknown", "UNKNOWN", "invalid", {})

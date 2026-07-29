@@ -59,7 +59,7 @@ def _sanitize_value(value: object, secrets: tuple[str, ...]) -> object:
         return safe_text(value, secrets)
     if isinstance(value, dict):
         return {
-            _sanitize_value(key, secrets): _sanitize_value(item, secrets)
+            key: _sanitize_value(item, secrets)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -77,8 +77,9 @@ def build_report(
     checks = []
     for result in results:
         check = asdict(result)
-        check["summary"] = safe_text(check["summary"], secrets)
-        check["details"] = _sanitize_value(check["details"], secrets)
+        if secrets:
+            check["summary"] = safe_text(check["summary"], secrets)
+            check["details"] = _sanitize_value(check["details"], secrets)
         checks.append(check)
     return {
         "checked_at": checked_at,
