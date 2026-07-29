@@ -1,6 +1,6 @@
-# Local Aurora API
+# Solis_Aurora_Gateway
 
-Local Aurora API 是一套面向飞牛 fnOS 的 Docker Compose 部署配置，用于把 ChatGPT Web 能力通过 Aurora 转换为 OpenAI 兼容接口，并由 New API 统一管理令牌、渠道和模型。
+Solis_Aurora_Gateway 是一套面向飞牛 fnOS 的 Docker Compose 部署配置，用于把 ChatGPT Web 能力通过 Aurora 转换为 OpenAI 兼容接口，并由 New API 统一管理令牌、渠道和模型。
 
 项目包含以下服务：
 
@@ -21,7 +21,7 @@ Local Aurora API 是一套面向飞牛 fnOS 的 Docker Compose 部署配置，�
 将项目放到 NAS，例如：
 
 ```bash
-cd /vol1/YOUR_USER_ID/local_aurora_api
+cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 ```
 
 创建本地环境文件，填写随机 `SESSION_SECRET` 和 NAS 的局域网 IPv4 地址：
@@ -36,7 +36,7 @@ openssl rand -hex 16
 初始化运行目录：
 
 ```bash
-mkdir -p data/mihomo data/new-api
+mkdir -p data/mihomo data/new-api backups/legacy
 cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 ```
 
@@ -111,4 +111,5 @@ python3 scripts/check_stack_health.py
 - 思考档不会向第三方客户端返回可见的思考过程。
 - 模型联网搜索的引用标记偶有乱码或截断。
 - `7890` 只供 Compose 内部的 Aurora 使用，不发布到 NAS；`9090` 仅绑定 `.env` 指定的局域网 IPv4 地址。
+- `backups/` 只保存本地备份，备份正文不进入 Git；项目级备份必须排除该目录。
 - 四个第三方容器镜像固定到 NAS 已验证运行的 digest；升级前应检查上游变更、备份 `data/`，并逐个服务更新和验证。

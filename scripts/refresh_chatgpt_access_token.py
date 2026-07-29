@@ -388,7 +388,7 @@ def parse_args() -> argparse.Namespace:
         "--root",
         type=Path,
         default=Path(__file__).resolve().parents[1],
-        help="local_aurora_api project root",
+        help="Solis_Aurora_Gateway project root",
     )
     parser.add_argument("--channel-id", type=int, default=1)
     parser.add_argument("--threshold-hours", type=int, default=72)

@@ -5,6 +5,10 @@
 # 容器运行数据
 /data/
 
+# 本地备份正文；仅保留目录说明
+/backups/*
+!/backups/README.md
+
 # 本地第三方安装制品
 /artifacts/*.fpk
 

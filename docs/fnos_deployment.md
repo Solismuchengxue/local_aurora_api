@@ -1,7 +1,8 @@
 # 飞牛 fnOS 部署指南：aurora + new-api 反向代理 ChatGPT Web 为 OpenAI 兼容 API
 
-> 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录与冷备份暂时保留用于回滚。
+> 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录已于 2026-07-29 在确认无运行引用后删除；已校验的冷备份迁入 `backups/legacy/`，暂时保留用于回滚。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
+> 项目共享名称现为 `Solis_Aurora_Gateway`。FNOS 正式切换前，现有运行目录和 cron 仍使用 `/vol1/1000/local_aurora_api`；以下首次部署示例使用迁移后的目标目录名。
 
 ---
 
@@ -64,15 +65,17 @@ ChatGPT (api.openai.com / chatgpt.com)
 
 ## 3. 目录结构
 
-把本项目复制到飞牛数据卷，例如 `/vol1/YOUR_USER_ID/local_aurora_api/`：
+把本项目复制到飞牛数据卷，例如 `/vol1/YOUR_USER_ID/Solis_Aurora_Gateway/`：
 
 ```
-/vol1/YOUR_USER_ID/local_aurora_api/
+/vol1/YOUR_USER_ID/Solis_Aurora_Gateway/
 ├── .env                         # 本机 SESSION_SECRET，不提交
 ├── docker-compose.yml
 ├── config/
 │   └── mihomo/
 │       └── config.example.yaml # 首次启动示例
+├── backups/
+│   └── legacy/                 # 本地旧栈冷备份，正文不提交
 └── data/
     ├── mihomo/
     │   └── config.yaml         # 运行配置，会被订阅或 WebUI 更新
@@ -82,9 +85,9 @@ ChatGPT (api.openai.com / chatgpt.com)
 首次部署时初始化本地文件：
 
 ```bash
-cd /vol1/YOUR_USER_ID/local_aurora_api
+cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 cp .env.example .env
-mkdir -p data/mihomo data/new-api
+mkdir -p data/mihomo data/new-api backups/legacy
 cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 ```
 
@@ -95,7 +98,7 @@ cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 
 只在首次部署时复制 Mihomo 示例配置；已有 `data/mihomo/config.yaml` 时不要覆盖。
 
-> 本栈不挂载 `access_tokens.txt`：token 在 New API 渠道密钥里填写，再通过 Aurora 的外部 token 能力使用（见 §8）。Aurora 也支持自己的 token 文件账号池，但那是另一种部署方式，本项目没有采用。本地备份只能放在被忽略的 `.secrets/`，不要复制到共享目录。
+> 本栈不挂载 `access_tokens.txt`：token 在 New API 渠道密钥里填写，再通过 Aurora 的外部 token 能力使用（见 §8）。Aurora 也支持自己的 token 文件账号池，但那是另一种部署方式，本项目没有采用。包含数据库、配置或凭据的归档只放在被 Git 忽略的 `backups/`；项目级备份必须排除该目录，避免递归打包。
 >
 > **旧部署迁移边界**：2026-07-26 的 NAS 只读盘点发现，仍在运行的旧目录使用 `mihomo/`、`new-api-data/`，并向 Aurora 挂载 `access_tokens.txt`。本节描述的是当前仓库的新目标结构，不能直接覆盖旧目录。迁移前必须先备份并校验，保持原 `SESSION_SECRET`，再决定是否继续保留账号池挂载。
 
@@ -118,10 +121,10 @@ cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 
 ## 5. 启动服务
 
-在 `/vol1/YOUR_USER_ID/local_aurora_api/` 目录执行（镜像源已在 §2 确认可用）：
+在 `/vol1/YOUR_USER_ID/Solis_Aurora_Gateway/` 目录执行（镜像源已在 §2 确认可用）：
 
 ```bash
-cd /vol1/YOUR_USER_ID/local_aurora_api
+cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 docker compose up -d
 ```
 
@@ -175,7 +178,7 @@ New API 镜像**首次启动是未初始化状态**，默认 `root/123456` 登�
 
 > 如果之前装过、数据库已初始化但忘了密码：备份并清库重建——
 > ```bash
-> cd /vol1/YOUR_USER_ID/local_aurora_api
+> cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 > mv data/new-api/one-api.db data/new-api/one-api.db.bak-$(date +%Y%m%d-%H%M%S)
 > docker compose up -d --force-recreate new-api
 > ```
@@ -354,7 +357,7 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 4. 添加用户级 cron，每天 04:17 和 16:17 检查；脚本只在剩余不足 72 小时时执行换取和更新：
 
    ```cron
-   17 4,16 * * * cd /vol1/YOUR_USER_ID/local_aurora_api && /usr/bin/python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --threshold-hours 72 >> .secrets/token-refresh.log 2>&1
+   17 4,16 * * * cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway && /usr/bin/python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --threshold-hours 72 >> .secrets/token-refresh.log 2>&1
    ```
 
 安全与回滚行为：
@@ -377,7 +380,7 @@ access token 有效期有限。基础模式需要在过期前手动更新 New AP
 python3 scripts/check_stack_health.py
 python3 scripts/check_stack_health.py --json
 python3 scripts/check_stack_health.py \
-  --root /path/to/local_aurora_api \
+  --root /path/to/Solis_Aurora_Gateway \
   --channel-id 1 \
   --json
 ```

@@ -1,4 +1,6 @@
 # 飞牛 fnOS：Mihomo + Aurora + New API + MetaCubeXD
+name: aurora-stack
+
 services:
   mihomo:
     # 2026-07-27 NAS 已验证基线：v1.19.29

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件适用于 `local_aurora_api` 项目。
+本文件适用于 `Solis_Aurora_Gateway` 项目。迁移完成前，本地和 FNOS 仍可能使用历史路径 `local_aurora_api`。
 
 ## 项目边界
 

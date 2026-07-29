@@ -1,4 +1,4 @@
-# Local Aurora API 设计
+# Solis_Aurora_Gateway 设计
 
 状态：已采用
 最近更新：2026-07-26
@@ -42,6 +42,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 | `scripts/` | 无第三方依赖的运维脚本 | 跟踪 |
 | `tests/` | 运维脚本回归测试 | 跟踪 |
 | `data/` | Mihomo 与 New API 的运行数据 | 忽略 |
+| `backups/` | 本地冷备份；仅跟踪目录说明 | 备份正文忽略 |
 | `docs/` | 长期部署和排障文档 | 跟踪 |
 | `assets/icons/` | WatchCow 可选图标 | 跟踪 |
 | `.secrets/` | 本地凭据、续期锁和恢复副本 | 忽略 |
@@ -98,7 +99,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - 2026-07-27 已完成到 `local_aurora_api` 的受控切换；四个容器的 Compose 工作目录和持久化挂载均指向新结构，GLOBAL、新加坡出口、模型列表和最小聊天请求均验证通过。
 - 首次切换曾通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token；该挂载不再作为定时续期的正式依赖。
 - session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法稳定使用 session/access-token 账号池，因此采用外部定时脚本更新 New API 的 SQLite 渠道记录。
-- 旧目录 `aurora-stack` 与已校验冷备份暂时保留，用于观察期内回滚。
+- 旧目录 `aurora-stack` 已于 2026-07-29 在确认无容器、cron 或进程引用后删除；已校验的冷备份迁入 `backups/legacy/`，用于必要时回滚。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 当前 Compose 已固定四个已验证镜像 digest；尚未执行任何镜像升级，未来升级仍需逐项受控试验。
 

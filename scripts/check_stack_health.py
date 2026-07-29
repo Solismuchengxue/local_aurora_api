@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only health check for the local_aurora_api fnOS stack."""
+"""Read-only health check for the Solis_Aurora_Gateway fnOS stack."""
 
 from __future__ import annotations
 
@@ -789,7 +789,7 @@ def parse_args(
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="只读检查 local_aurora_api 运行状态"
+        description="只读检查 Solis_Aurora_Gateway 运行状态"
     )
     parser.add_argument(
         "--root",
