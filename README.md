@@ -31,7 +31,7 @@ cp .env.example .env
 openssl rand -hex 16
 ```
 
-把生成的值写入 `.env` 的 `SESSION_SECRET`，并把 `NAS_LAN_IP` 设置为 NAS 的局域网 IPv4 地址，例如 `192.168.0.38`。不要提交或分享 `.env`。
+把生成的值写入 `.env` 的 `SESSION_SECRET`，并把 `NAS_LAN_IP` 设置为 NAS 的局域网 IPv4 地址，例如 `192.168.0.100`。不要提交或分享 `.env`。
 
 初始化运行目录：
 
