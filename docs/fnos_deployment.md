@@ -3,7 +3,7 @@
 > 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录已于 2026-07-29 在确认无运行引用后删除；已校验的冷备份迁入 `backups/legacy/`。2026-07-29 又完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换，本轮只验证容器、Compose 标签、挂载、cron 和本地端口，未调用真实聊天。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 > 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
-> 脱敏健康状态接入 n8n 的工作推迟到改革部全部迁移完成后再单独评审和批准；当前部署不依赖 n8n。
+> 脱敏健康状态生产器已完成本地候选实现；FNOS 部署、Studio OS 只读挂载和 n8n 导入/激活仍推迟到改革部全部迁移完成后分别评审和批准，当前部署不依赖 n8n。
 
 ---
 
@@ -419,21 +419,57 @@ python3 scripts/check_stack_health.py \
 
 脚本不会修改数据库、Token、容器、节点选择或配置，也不会输出凭据和聊天正文。
 
-### 11.3 mihomo 保持 GLOBAL 模式
+### 11.3 n8n 离线健康状态生产器（本地候选，未部署）
+
+`scripts/write_n8n_health_status.py` 是与完整健康检查隔离的候选生产器。它只读取限定的 Docker 元数据、本地 TCP、SQLite 渠道 Token 到期元数据以及续期锁/日志白名单字段，原子替换一个固定 Schema v1 的脱敏 `latest.json`；不调用模型、聊天、代理出口或外部 API。
+
+2026-08-01 的 FNOS 只读预检确认：Mihomo 容器桥接地址的 `9090` 可达，但 FNOS 主机回环访问其指定 LAN 发布地址超时。生产器因此仍先验证 `docker port` 返回合法发布绑定，再仅对 Mihomo 使用限定 `docker inspect` 动态取得容器桥接 IPv4 做 TCP 建连；其余三个服务继续检查本机发布地址。任何实际地址都不会写入状态文件。
+
+候选命令：
+
+```bash
+python3 scripts/write_n8n_health_status.py \
+  --root /vol1/1000/Solis_Aurora_Gateway \
+  --output /vol1/1000/Solis_Studio_OS/data/ops/aurora-gateway/latest.json \
+  --channel-id 1
+```
+
+生产器不创建输出父目录；父目录缺失、为符号链接或权限不正确时失败关闭。活动目录只允许滚动的 `latest.json`，文件最大 16 KiB，不生成逐次状态或日志历史。退出码如下：
+
+- `0`：已发布 `PASS` 或 `WARN`；
+- `1`：已发布 `FAIL`；
+- `2`：生产器自身错误，未发布新状态。
+
+未来候选 cron 使用 `Asia/Shanghai` 的 05:12 和 17:12，位于既有 04:17/16:17 续期检查开始后 55 分钟：
+
+```cron
+12 5,17 * * * cd /vol1/1000/Solis_Aurora_Gateway && /usr/bin/python3 scripts/write_n8n_health_status.py --root /vol1/1000/Solis_Aurora_Gateway --output /vol1/1000/Solis_Studio_OS/data/ops/aurora-gateway/latest.json --channel-id 1 >/dev/null 2>&1
+```
+
+这是候选配置，不得直接安装。当前只完成 Windows 本地实现和模拟验证；以下仍是相互独立、尚未授权的门禁：
+
+1. FNOS 现场只读核对 Python、Docker 字段、端口绑定、SQLite/续期元数据、目录权限和时区；
+2. 创建受管状态目录、安装生产 cron，并为 n8n 配置宿主机强制的专用只读子挂载；当前 `/exchange` 的 RW 挂载不能作为只读保证；
+3. 导入 n8n 工作流，验证缺失、过期、未来时间、格式错误和状态异常的本地判断；
+4. 仅在前述验证后测试 SMTP 通知并单独批准激活。
+
+Aurora 是状态权威，Studio OS/n8n 只能消费，不能通过该链路修改 Aurora。文件型首版不新增或复用 Credential；SMTP 只属于后续异常通知。`latest.json` 未来会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此内容不得包含 Token、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志/命令输出，也不得扩展为无界历史。
+
+### 11.4 mihomo 保持 GLOBAL 模式
 
 在 Mihomo WebUI 中确认出站模式为 `GLOBAL`、GLOBAL 首选节点为新加坡解锁节点（见 §6.1）。切换到 `rule` 可能让 Aurora 改走其他节点。每次更新订阅后重新确认模式和节点选择。
 
-### 11.4 不影响飞牛 IPv6 DDNS
+### 11.5 不影响飞牛 IPv6 DDNS
 
 当前设计不启用 Mihomo TUN，并且只有 Aurora 配置 `http_proxy`，因此不会主动接管飞牛系统路由。部署后仍应实际验证 IPv6 DDNS 和防火墙行为。
 
-### 11.5 Mihomo 端口边界
+### 11.6 Mihomo 端口边界
 
 Mihomo 的 `7890` 代理端口不发布到 NAS，只供 Compose 网络内的 Aurora 使用。`9090` 控制端口没有默认认证，但只绑定 `.env` 中的 `NAS_LAN_IP`，不会监听 NAS 的 IPv6 地址或其他 IPv4 网卡。
 
 这项绑定不能替代边界防火墙：仍应确认路由器没有把 `9090` 转发到公网，并避免把 `NAS_LAN_IP` 设置成 `0.0.0.0`。
 
-### 11.6 排障速查
+### 11.7 排障速查
 
 | 现象 | 原因 | 解决 |
 |---|---|---|

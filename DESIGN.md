@@ -103,7 +103,16 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - 旧目录 `aurora-stack` 已于 2026-07-29 在确认无容器、cron 或进程引用后删除；已校验的冷备份迁入 `backups/legacy/`，用于必要时回滚。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 当前 Compose 已固定四个已验证镜像 digest；尚未执行任何镜像升级，未来升级仍需逐项受控试验。
-- 脱敏健康状态接入 n8n 的工作推迟到改革部全部迁移完成后再单独评审和批准；n8n 当前不是本项目运行依赖。
+- 已完成 `scripts/write_n8n_health_status.py` 的 Windows 本地候选实现与模拟测试；它只生成固定 Schema v1 的脱敏离线状态，不调用模型、聊天、代理出口或外部 API。该实现尚未部署到 FNOS，n8n 当前仍不是本项目运行依赖。
+
+## n8n 离线健康状态边界
+
+- Aurora 是自身运行状态的生产者和权威来源；Studio OS/n8n 未来只能消费状态，不能通过状态链路反向修改 Aurora、容器、数据库、Token、Compose 或 cron。
+- 生产器固定汇总容器、运行契约、本地 TCP、SQLite/渠道 Token 元数据和续期事件五项检查，以原子替换方式发布单个 `latest.json`；文件最大 16 KiB，不生成状态历史。
+- 本地 TCP 检查仍要求四个批准端口具有合法 Docker 发布绑定；由于 FNOS 主机不能稳定回环到 Mihomo 的指定 LAN 发布地址，Mihomo 服务可达性改用运行时发现的容器桥接 IPv4 验证，地址仅在内存中使用且不进入状态。
+- 状态只允许固定 Schema、状态码、布尔值、计数、固定事件枚举和 UTC 时间，不包含凭据、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志、命令输出或异常正文。
+- 文件型首版不新增或复用 Credential。未来部署仍须分别通过 FNOS 现场只读验证、状态目录与 cron 部署、Studio OS 专用只读子挂载、n8n 导入/通知验证及激活门禁；当前 `/exchange` 的 RW 挂载不能视为只读隔离。
+- 活动目录只保留滚动 `latest.json`。该文件未来会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此不得扩展为敏感字段或无界历史。
 
 ## 更新触发
 
