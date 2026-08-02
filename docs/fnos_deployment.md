@@ -3,7 +3,7 @@
 > 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录已于 2026-07-29 在确认无运行引用后删除；已校验的冷备份迁入 `backups/legacy/`。2026-07-29 又完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换，本轮只验证容器、Compose 标签、挂载、cron 和本地端口，未调用真实聊天。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 > 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
-> 脱敏健康状态生产器已完成本地候选实现；FNOS 部署、Studio OS 只读挂载和 n8n 导入/激活仍推迟到改革部全部迁移完成后分别评审和批准，当前部署不依赖 n8n。
+> 脱敏健康状态生产器、生产 cron、Studio OS 专用只读子挂载和 n8n 工作流导入已于 2026-08-02 完成；合成异常邮件与真实 `PASS` 静默路径均已验证。工作流仍未发布或激活，当前不会自动执行。
 
 ---
 
@@ -419,13 +419,13 @@ python3 scripts/check_stack_health.py \
 
 脚本不会修改数据库、Token、容器、节点选择或配置，也不会输出凭据和聊天正文。
 
-### 11.3 n8n 离线健康状态生产器（本地候选，未部署）
+### 11.3 n8n 离线健康状态生产器（已部署，工作流未激活）
 
-`scripts/write_n8n_health_status.py` 是与完整健康检查隔离的候选生产器。它只读取限定的 Docker 元数据、本地 TCP、SQLite 渠道 Token 到期元数据以及续期锁/日志白名单字段，原子替换一个固定 Schema v1 的脱敏 `latest.json`；不调用模型、聊天、代理出口或外部 API。
+`scripts/write_n8n_health_status.py` 是与完整健康检查隔离的生产器。它只读取限定的 Docker 元数据、本地 TCP、SQLite 渠道 Token 到期元数据以及续期锁/日志白名单字段，原子替换一个固定 Schema v1 的脱敏 `latest.json`；不调用模型、聊天、代理出口或外部 API。
 
 2026-08-01 的 FNOS 只读预检确认：Mihomo 容器桥接地址的 `9090` 可达，但 FNOS 主机回环访问其指定 LAN 发布地址超时。生产器因此仍先验证 `docker port` 返回合法发布绑定，再仅对 Mihomo 使用限定 `docker inspect` 动态取得容器桥接 IPv4 做 TCP 建连；其余三个服务继续检查本机发布地址。任何实际地址都不会写入状态文件。
 
-候选命令：
+FNOS 生产命令：
 
 ```bash
 python3 scripts/write_n8n_health_status.py \
@@ -440,20 +440,23 @@ python3 scripts/write_n8n_health_status.py \
 - `1`：已发布 `FAIL`；
 - `2`：生产器自身错误，未发布新状态。
 
-未来候选 cron 使用 `Asia/Shanghai` 的 05:12 和 17:12，位于既有 04:17/16:17 续期检查开始后 55 分钟：
+已安装的用户 cron 使用 `Asia/Shanghai` 的 05:12 和 17:12，位于既有 04:17/16:17 续期检查开始后 55 分钟：
 
 ```cron
 12 5,17 * * * cd /vol1/1000/Solis_Aurora_Gateway && /usr/bin/python3 scripts/write_n8n_health_status.py --root /vol1/1000/Solis_Aurora_Gateway --output /vol1/1000/Solis_Studio_OS/data/ops/aurora-gateway/latest.json --channel-id 1 >/dev/null 2>&1
 ```
 
-这是候选配置，不得直接安装。当前只完成 Windows 本地实现和模拟验证；以下仍是相互独立、尚未授权的门禁：
+2026-08-02 已完成以下部署与验证：
 
-1. FNOS 现场只读核对 Python、Docker 字段、端口绑定、SQLite/续期元数据、目录权限和时区；
-2. 创建受管状态目录、安装生产 cron，并为 n8n 配置宿主机强制的专用只读子挂载；当前 `/exchange` 的 RW 挂载不能作为只读保证；
-3. 导入 n8n 工作流，验证缺失、过期、未来时间、格式错误和状态异常的本地判断；
-4. 仅在前述验证后测试 SMTP 通知并单独批准激活。
+1. FNOS 现场核对 Python、Docker 限定字段、本地端口、SQLite/续期元数据、目录权限和时区；
+2. 创建受管状态目录并安装上述 cron；活动目录仅保留一个滚动 `latest.json`；
+3. 保留 `/exchange` 读写父挂载，同时把 `/exchange/ops/aurora-gateway` 覆盖为专用只读子挂载；`docker inspect` 显示子挂载 `RW=false`，容器内写入哨兵因只读文件系统失败且宿主机无残留，父目录的独立读写验证不受影响；
+4. 导入 `Solis Aurora Gateway Alert (Phase 1)`，保持 `active=false`，时区为 `Asia/Shanghai`，计划在 05:15、17:15 检查；
+5. 手工合成异常执行成功并确认现有 SMTP 通知送达；随后手工刷新合法 `PASS` 状态，从计划触发器运行真实文件读取链，执行成功且未进入邮件节点。两次验证均未调用真实 Aurora API。
 
-Aurora 是状态权威，Studio OS/n8n 只能消费，不能通过该链路修改 Aurora。文件型首版不新增或复用 Credential；SMTP 只属于后续异常通知。`latest.json` 未来会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此内容不得包含 Token、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志/命令输出，也不得扩展为无界历史。
+工作流发布/激活是当前唯一剩余门禁。激活前必须再次确认 producer cron、单一状态文件、专用只读子挂载、容器健康、工作流计划与 `active=false`；激活操作不得手工执行工作流、修改 SMTP/数据库/Compose/cron 或影响其他工作流。
+
+Aurora 是状态权威，Studio OS/n8n 只能消费，不能通过该链路修改 Aurora。文件型状态生产、挂载、读取和校验不新增或复用 Credential；现有 SMTP Credential 只属于异常通知。`latest.json` 会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此内容不得包含 Token、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志/命令输出，也不得扩展为无界历史。
 
 ### 11.4 mihomo 保持 GLOBAL 模式
 
