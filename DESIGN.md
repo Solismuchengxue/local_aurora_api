@@ -112,7 +112,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - 本地 TCP 检查仍要求四个批准端口具有合法 Docker 发布绑定；由于 FNOS 主机不能稳定回环到 Mihomo 的指定 LAN 发布地址，Mihomo 服务可达性改用运行时发现的容器桥接 IPv4 验证，地址仅在内存中使用且不进入状态。
 - 状态只允许固定 Schema、状态码、布尔值、计数、固定事件枚举和 UTC 时间，不包含凭据、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志、命令输出或异常正文。
 - 文件型状态生产、挂载、读取和校验不新增或复用 Credential；现有 SMTP Credential 只用于异常通知。2026-08-02 已完成 FNOS 现场验证、状态目录与 cron 部署，并在 `/exchange` 读写父挂载之上增加 `/exchange/ops/aurora-gateway` 专用只读子挂载；`docker inspect`、容器内失败写入哨兵和父目录独立读写均验证通过。
-- `Solis Aurora Gateway Alert (Phase 1)` 已导入 n8n，时区为 `Asia/Shanghai`，在 05:15、17:15 读取状态。手工合成异常已验证邮件通知成功，真实 `PASS` 文件链已验证静默且未执行邮件节点；两次验证均未调用真实 Aurora API。工作流当前仍未发布或激活，尚不会自动执行。
+- `Solis Aurora Gateway Alert (Phase 1)` 已导入、发布并激活，时区为 `Asia/Shanghai`，在 05:15、17:15 读取状态。手工合成异常已验证邮件通知成功，真实 `PASS` 文件链已验证静默且未执行邮件节点；两次验证均未调用真实 Aurora API。激活时没有手工执行工作流，自动检查只由计划触发器启动。
 - 活动目录只保留滚动 `latest.json`。该文件未来会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此不得扩展为敏感字段或无界历史。
 
 ## 更新触发
