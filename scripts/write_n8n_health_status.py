@@ -392,6 +392,8 @@ def collect_container_snapshots(
         parsed_mounts = []
         seen_mounts = set()
         for line in mounts.stdout.splitlines():
+            if line == "":
+                continue
             mount_fields = line.split("\t")
             if len(mount_fields) != 3 or mount_fields[2] not in {"true", "false"}:
                 raise RuntimeError("container_inspect_failed")

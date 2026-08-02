@@ -257,6 +257,30 @@ class DockerCheckTests(unittest.TestCase):
         self.assertNotIn("json .", rendered)
         self.assertNotIn("project.config_files", rendered)
 
+    def test_collect_snapshots_accepts_docker_cli_trailing_blank_lines(self):
+        outputs = iter(
+            [
+                "/aurora\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
+                "\n",
+                "/new-api\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
+                "/data\t/vol1/1000/Solis_Aurora_Gateway/data/new-api\ttrue\n\n",
+                "/mihomo\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
+                "/root/.config/mihomo\t/vol1/1000/Solis_Aurora_Gateway/data/mihomo\ttrue\n\n",
+                "/metacubexd\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
+                "\n",
+            ]
+        )
+
+        def fake_run(args, timeout=20):
+            return subprocess.CompletedProcess(args, 0, next(outputs), "")
+
+        snapshots = MODULE.collect_container_snapshots(fake_run)
+
+        self.assertEqual(snapshots["aurora"].mounts, ())
+        self.assertEqual(len(snapshots["new-api"].mounts), 1)
+        self.assertEqual(len(snapshots["mihomo"].mounts), 1)
+        self.assertEqual(snapshots["metacubexd"].mounts, ())
+
     def test_malformed_inspect_fails_with_fixed_error(self):
         def fake_run(args, timeout=20):
             return subprocess.CompletedProcess(args, 0, "raw-private-output", "")
