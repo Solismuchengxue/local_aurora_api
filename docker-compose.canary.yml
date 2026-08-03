@@ -14,8 +14,8 @@ services:
       http_proxy: http://mihomo:7890
     volumes:
       - type: bind
-        source: ./.secrets/canary/session_tokens.txt
-        target: /session_tokens.txt
+        source: ./.secrets/canary/access_tokens.txt
+        target: /access_tokens.txt
         read_only: true
     networks:
       - canary

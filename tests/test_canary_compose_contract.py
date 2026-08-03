@@ -18,7 +18,7 @@ class CanaryComposeContractTests(unittest.TestCase):
         self.assertIn('"127.0.0.1:18080:8080"', text)
         self.assertIn('"127.0.0.1:13000:3000"', text)
         self.assertIn('ENABLE_EXTERNAL_TOKEN: "false"', text)
-        self.assertIn("target: /session_tokens.txt", text)
+        self.assertIn("target: /access_tokens.txt", text)
         self.assertIn("read_only: true", text)
         self.assertNotIn("/vol1/1000/Solis_Aurora_Gateway/data/new-api", text)
         self.assertNotIn("/var/run/docker.sock", text)
@@ -37,6 +37,13 @@ class CanaryComposeContractTests(unittest.TestCase):
             text,
         )
         self.assertNotIn(":latest", text)
+
+    def test_aurora_canary_mounts_only_the_access_token_snapshot(self):
+        text = COMPOSE.read_text(encoding="utf-8")
+        self.assertIn("source: ./.secrets/canary/access_tokens.txt", text)
+        self.assertIn("target: /access_tokens.txt", text)
+        self.assertIn("read_only: true", text)
+        self.assertNotIn("session_tokens", text)
 
     def test_example_lists_names_only_and_real_file_is_ignored(self):
         example = ENV_EXAMPLE.read_text(encoding="utf-8")

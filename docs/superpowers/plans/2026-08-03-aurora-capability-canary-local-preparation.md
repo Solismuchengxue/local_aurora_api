@@ -4,7 +4,7 @@
 
 **Goal:** 在 Windows 仓库中实现一个默认不能访问生产端口、必须显式批准真实调用的 Aurora 多模态 canary 验收工具和隔离 Compose 定义，为后续 FNOS canary 提供可测试、可回退且不泄露凭据的本地制品。
 
-**Architecture:** 新增一个标准库 Python canary 工具，分别对固定 loopback 端口上的 Aurora canary 和 New API canary 执行同一能力矩阵，只输出固定枚举、布尔值、计数和 UTC 时间。新增单独的 Compose 文件定义 canary 容器、数据和只读 session token 挂载；生产 `docker-compose.yml`、健康生产器、cron、n8n 和正式文档保持不变。
+**Architecture:** 新增一个标准库 Python canary 工具，分别对固定 loopback 端口上的 Aurora canary 和 New API canary 执行同一能力矩阵，只输出固定枚举、布尔值、计数和 UTC 时间。新增单独的 Compose 文件定义 canary 容器、数据和只读 access token 快照挂载；生产 `docker-compose.yml`、健康生产器、cron、n8n 和正式文档保持不变。该快照只验证即时能力，不承担自动续期或生产凭据权威职责。
 
 **Tech Stack:** Python 3 标准库（`argparse`、`base64`、`dataclasses`、`http.client`、`json`、`pathlib`、`struct`、`tempfile`、`unittest`、`urllib`、`wave`、`zlib`）、Docker Compose v2 静态解析、JSON Schema Draft 2020-12 文档（不新增校验库）。
 
@@ -15,7 +15,7 @@
 - canary 工具只允许访问 `http://127.0.0.1:18080` 与 `http://127.0.0.1:13000`；必须拒绝生产 `8080`/`3000`、非 loopback 主机、HTTPS 外站和任意自定义 URL。
 - 缺少 `--allow-real-api` 时，工具必须在建立任何网络连接前以退出码 `2` 失败关闭。
 - 真实凭据只从被忽略的 `.env.canary` 和 `.secrets/canary/new_api_client_token.txt` 读取；不得通过 CLI 参数、日志、报告、异常正文或测试 fixture 输出。
-- canary Aurora 只读挂载单个 `.secrets/canary/session_tokens.txt`；不得挂载整个 `.secrets/`，不得把文件改成 world-readable。
+- canary Aurora 只读挂载单个 `.secrets/canary/access_tokens.txt`；不得同时挂载 `session_tokens.txt` 或整个 `.secrets/`，不得把文件改成 world-readable。
 - 报告只含固定枚举、布尔值、整数和 UTC 时间；不得包含 prompt、回复文本、file id、签名 URL、base64、音频、图片、Token、Cookie、邮箱、连接串、原始日志或异常正文。
 - 单次响应体最大读取 `32 MiB`，单次 JSON 文本最大 `8 MiB`，最终报告最大 `32 KiB`。
 - 使用合成内容；不读取用户业务文件、真实聊天、私人图片或私人音频。
@@ -73,7 +73,7 @@ class CanaryComposeContractTests(unittest.TestCase):
         self.assertIn('"127.0.0.1:18080:8080"', text)
         self.assertIn('"127.0.0.1:13000:3000"', text)
         self.assertIn("ENABLE_EXTERNAL_TOKEN: \"false\"", text)
-        self.assertIn("target: /session_tokens.txt", text)
+        self.assertIn("target: /access_tokens.txt", text)
         self.assertIn("read_only: true", text)
         self.assertNotIn("/vol1/1000/Solis_Aurora_Gateway/data/new-api", text)
         self.assertNotIn("/var/run/docker.sock", text)
@@ -142,8 +142,8 @@ services:
       http_proxy: http://mihomo:7890
     volumes:
       - type: bind
-        source: ./.secrets/canary/session_tokens.txt
-        target: /session_tokens.txt
+        source: ./.secrets/canary/access_tokens.txt
+        target: /access_tokens.txt
         read_only: true
     networks:
       - canary
@@ -1154,11 +1154,11 @@ Create `docs/aurora_capability_canary.md` with these sections and facts:
 2. **安全边界**：生产 Compose/容器/SQLite/cron/n8n 不变；canary 仅使用 loopback `18080/13000`；Aurora canary 额外挂接生产内部网络只为访问 `mihomo:7890`，这不是网络硬隔离。
 3. **FNOS 前置只读核对**：架构、外部网络名、端口占用、容器 UID/GID、secret 文件元数据和当前生产状态；不读取 secret 正文。
 4. **候选镜像门禁**：核对 Aurora 官方来源、VERSION、MIT license、linux/amd64 manifest 和不可变 digest；拉取另行批准。
-5. **secret 门禁**：只挂载 `.secrets/canary/session_tokens.txt`；非 world-readable；容器内只读；不能通过放宽到 `644` 解决权限。
+5. **secret 门禁**：只挂载 `.secrets/canary/access_tokens.txt`；权限 `600`；容器内只读；不得读取、打印或复制正文，也不能通过放宽到 `644` 解决权限。
 6. **New API canary 初始化**：独立空数据库，渠道 base URL 精确为 `http://aurora-canary:8080`，渠道 key 为稳定服务 key；客户端 token 只保存在 `.secrets/canary/new_api_client_token.txt`。
 7. **真实执行顺序**：先 `--target direct`，全部 PASS 后才运行 `--target both`；每次真实调用都需独立批准。
 8. **远端副作用**：Files/图片/音频会在 ChatGPT 上游产生最小合成请求；若上游没有删除接口，测试制品不能主动清理，必须在授权前披露。
-9. **自然续期门禁**：保持 canary 到旧 access token 自然过期后复测，再单独重启 canary Aurora 复测；当前工具的能力 PASS 不等于续期 PASS。
+9. **续期边界**：access token 快照只验证即时能力，不可续期；到期后的失败属于预期，不得据此声称自动续期成功或失败，也不得据此切换生产。
 10. **停止与清理**：失败时生产不变；是否保留或删除 canary 容器、数据、状态报告和镜像由独立清理授权决定。
 
 Include commands only as future approved examples, always using:

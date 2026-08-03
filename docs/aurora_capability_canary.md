@@ -2,7 +2,7 @@
 
 ## 状态
 
-这是本地准备阶段形成的候选运行手册，**尚未部署**。它不代表 Aurora 2.5、自动续期或任何多模态能力已经通过，也不构成 FNOS 操作、真实 API 调用、重启或清理授权。
+此前部署的 session-token canary 已完成故障定位；本手册现描述的 access-token canary 配置仍是**尚未部署**的本地候选。它不代表 Aurora 2.5 多模态能力已经通过，更不代表自动续期已经修复，也不构成 FNOS 操作、真实 API 调用、重启或清理授权。
 
 本手册配套的本地实现包括 [准备计划](superpowers/plans/2026-08-03-aurora-capability-canary-local-preparation.md)、[能力报告 Schema](contracts/aurora-capability-canary-report-v1.schema.json) 和 [设计规格](superpowers/specs/2026-08-03-aurora-capability-first-upgrade-design.md)。
 
@@ -27,8 +27,10 @@
 
 ## Secret 与初始化门禁
 
-- Aurora 只挂载 `.secrets/canary/session_tokens.txt`，且容器内为只读。
-- 该文件不得 world-readable；不能通过将权限放宽至 `644` 来解决 UID/GID 问题。
+- Aurora 只挂载 `.secrets/canary/access_tokens.txt` 到容器内 `/access_tokens.txt`，且容器内为只读；不得同时挂载 `session_tokens.txt`。
+- 该文件只允许包含经用户合法取得并专门放置的一行 ChatGPT access token；Codex 只核对存在性、大小、权限和挂载元数据，不读取、打印或复制正文。
+- 该文件权限必须为 `600`，不能通过放宽到 `644` 来解决 UID/GID 问题。
+- access token 快照不可续期，只用于隔离 canary 的即时能力验证，不得成为生产凭据权威。
 - New API canary 使用独立的空数据库；其 Aurora 渠道 base URL 必须精确为 `http://aurora-canary:8080`，渠道 key 为稳定的 Aurora 服务 key。
 - 客户端 token 仅存于 `.secrets/canary/new_api_client_token.txt`，不得写入 Compose、报告、日志或命令行。
 
@@ -56,7 +58,7 @@ python3 scripts/aurora_capability_canary.py --allow-real-api --target direct --j
 python3 scripts/aurora_capability_canary.py --allow-real-api --target both --output data/canary/evidence/latest-capability.json --json
 ```
 
-能力矩阵 PASS 只证明该次工具调用的能力结果，不等于自动续期通过。自然续期门禁要求保持 canary 至旧 access token 自然过期后复测，再单独重启 canary Aurora 并复测；两项均须在生产切换前得到独立的真实证据。
+能力矩阵 PASS 只证明该 access token 在本次调用时可支持对应能力。快照自然到期后的失败属于预期行为，不得把它解释为续期失败或成功；本方案不执行自然续期门禁，也不支持生产切换。若以后恢复 session/refresh 凭据路线，必须另行设计并验证真实换新与重启恢复。
 
 ## 停止与清理
 
