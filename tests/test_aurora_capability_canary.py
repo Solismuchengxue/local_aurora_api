@@ -1,4 +1,5 @@
 import contextlib
+import base64
 from datetime import datetime, timezone
 import importlib.util
 import io
@@ -364,3 +365,103 @@ class TextCapabilityTests(unittest.TestCase):
         response = MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":42}}]}')
         result = MODULE.check_chat_nonstream(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code, result.details), ("FAIL", "chat_nonstream_invalid", {}))
+
+
+class MultipartAndImageHelperTests(unittest.TestCase):
+    def test_test_png_is_deterministic_and_valid(self):
+        first = MODULE.make_test_png()
+        second = MODULE.make_test_png()
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertLess(len(first), 16 * 1024)
+
+    def test_multipart_contains_names_but_not_local_paths(self):
+        content_type, body = MODULE.encode_multipart(
+            fields={"model": "gpt-image-2", "prompt": "synthetic edit"},
+            files={"image": ("source.png", "image/png", MODULE.make_test_png())},
+            boundary="aurora-canary-boundary",
+        )
+        self.assertEqual(content_type, "multipart/form-data; boundary=aurora-canary-boundary")
+        self.assertIn(b'filename="source.png"', body)
+        self.assertNotIn(str(Path.cwd()).encode(), body)
+
+    def test_multipart_rejects_over_eight_mib_requests(self):
+        with self.assertRaises(MODULE.ProbeError) as raised:
+            MODULE.encode_multipart(
+                fields={},
+                files={"file": ("canary.bin", "application/octet-stream", b"x" * (8 * 1024 * 1024))},
+                boundary="aurora-canary-boundary",
+            )
+        self.assertEqual(raised.exception.code, "request_too_large")
+
+
+def image_json(image: bytes) -> bytes:
+    return json.dumps({"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}).encode("utf-8")
+
+
+class ImageCapabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+
+    def test_generation_accepts_decodable_b64_only(self):
+        result = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png())),
+        )
+        self.assertEqual((result.status, result.code), ("PASS", "image_generation_valid"))
+        self.assertEqual(result.details["media_type"], "image/png")
+        self.assertNotIn("b64_json", result.details)
+
+    def test_image_results_reject_malformed_base64_and_url_only(self):
+        malformed = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"data":[{"b64_json":"%%%"}]}'),
+        )
+        url_only = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"data":[{"url":"https://example.invalid/private"}]}'),
+        )
+        self.assertEqual((malformed.status, malformed.code, malformed.details), ("FAIL", "image_payload_invalid", {}))
+        self.assertEqual((url_only.status, url_only.code, url_only.details), ("FAIL", "image_url_not_accepted", {}))
+
+    def test_image_requests_use_the_expected_json_and_multipart_contracts(self):
+        calls = []
+
+        def transport(*args, **kwargs):
+            calls.append((args, kwargs))
+            return MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png()))
+
+        generation = MODULE.check_image_generation(self.target, transport)
+        edit = MODULE.check_image_edit(self.target, transport)
+        variation = MODULE.check_image_variation(self.target, transport)
+        self.assertEqual([generation.code, edit.code, variation.code], ["image_generation_valid", "image_edit_valid", "image_variation_valid"])
+        self.assertEqual(calls[0][0][2], "/v1/images/generations")
+        self.assertEqual(json.loads(calls[0][1]["body"]), {"model": "gpt-image-2", "prompt": MODULE.IMAGE_GENERATION_PROMPT, "n": 1, "size": "1024x1024", "response_format": "b64_json"})
+        self.assertEqual(calls[1][0][2], "/v1/images/edits")
+        self.assertEqual(calls[2][0][2], "/v1/images/variations")
+        self.assertTrue(calls[1][1]["content_type"].startswith("multipart/form-data; boundary="))
+        self.assertIn(b'filename="aurora-canary.png"', calls[1][1]["body"])
+        self.assertIn(b'name="prompt"', calls[1][1]["body"])
+        self.assertNotIn(b'name="prompt"', calls[2][1]["body"])
+
+
+class FileCapabilityTests(unittest.TestCase):
+    def test_files_upload_then_chat_returns_sanitized_booleans(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        calls = []
+
+        def transport(*args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                return MODULE.HttpResponse(200, {}, b'{"id":"file-synthetic-private-id"}')
+            return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"AURORA-CANARY-FILE-OK"}}]}')
+
+        result = MODULE.check_files(target, transport)
+        self.assertEqual((result.status, result.code, result.details), ("PASS", "files_valid", {"upload_accepted": True, "file_id_present": True, "answer_present": True}))
+        self.assertEqual(calls[0][0][2], "/v1/files")
+        self.assertIn(b'filename="aurora-canary.txt"', calls[0][1]["body"])
+        self.assertIn(b"AURORA CANARY SYNTHETIC FILE", calls[0][1]["body"])
+        self.assertIn(b'name="purpose"', calls[0][1]["body"])
+        self.assertEqual(calls[1][0][2], "/v1/chat/completions")
+        self.assertIn("file-synthetic-private-id", calls[1][1]["body"].decode("utf-8"))
+        self.assertNotIn("file-synthetic-private-id", repr(result))
