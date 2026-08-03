@@ -128,17 +128,11 @@ CLI_ERROR_CODES = {
     "output_target_invalid",
     OUTPUT_WRITE_FAILED,
 }
-MEDIA_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "audio/wav",
-    "audio/mpeg",
-    "audio/ogg",
-    "audio/opus",
-    "audio/flac",
-    "audio/aac",
-    "audio/webm",
+PASS_MEDIA_TYPES_BY_CHECK = {
+    "image_generation": "image/png",
+    "image_edit": "image/png",
+    "image_variation": "image/png",
+    "audio_speech": "audio/wav",
 }
 ALLOWED_PATHS = {
     "/v1/models",
@@ -794,7 +788,7 @@ def _validate_result(result: CheckResult) -> None:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError("invalid result details")
         elif key == "media_type":
-            if value not in MEDIA_TYPES:
+            if value != PASS_MEDIA_TYPES_BY_CHECK.get(result.name):
                 raise ValueError("invalid result details")
         elif key == "dependency":
             dependencies = {"direct"}

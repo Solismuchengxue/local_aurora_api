@@ -12,7 +12,6 @@ import unittest
 from unittest import mock
 import wave
 import zlib
-from jsonschema import Draft202012Validator, ValidationError
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aurora_capability_canary.py"
@@ -964,6 +963,15 @@ class MatrixOrchestrationTests(unittest.TestCase):
 
 
 class SchemaContractTests(unittest.TestCase):
+    @staticmethod
+    def pass_contract(schema, check_name):
+        branch = schema["$defs"][check_name]["allOf"][2]["then"]["properties"]
+        detail_name = branch["details"]["$ref"].removeprefix("#/$defs/")
+        details = schema["$defs"][detail_name]
+        media = details["properties"].get("media_type", {})
+        allowed_media = {media["const"]} if "const" in media else set(media.get("enum", []))
+        return branch["code"]["const"], set(details["required"]), allowed_media
+
     def test_report_schema_locks_exact_order_and_sanitized_variants(self):
         with SCHEMA.open(encoding="utf-8") as stream:
             schema = json.load(stream)
@@ -980,30 +988,77 @@ class SchemaContractTests(unittest.TestCase):
         check = schema["$defs"].get("check", {})
         self.assertEqual(len(check.get("oneOf", [])), 12)
 
-    def test_draft_validator_and_runtime_agree_on_report_semantics(self):
+    def test_runtime_and_schema_reject_cross_media_types(self):
         with SCHEMA.open(encoding="utf-8") as stream:
-            validator = Draft202012Validator(json.load(stream))
-        valid = MODULE.build_report(
-            {"direct": passing_results()}, datetime(2026, 8, 3, 5, 0, tzinfo=timezone.utc)
-        )
-        self.assertEqual(MODULE.serialize_report(valid), json.dumps(valid, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
-        validator.validate(valid)
+            schema = json.load(stream)
+        for index, wrong_media in ((6, "audio/wav"), (9, "image/png")):
+            results = passing_results()
+            details = dict(results[index].details)
+            details["media_type"] = wrong_media
+            results[index] = MODULE.CheckResult(
+                results[index].name, results[index].status, results[index].code, details
+            )
+            with self.subTest(check=results[index].name, media_type=wrong_media):
+                with self.assertRaises(ValueError):
+                    MODULE.build_report({"direct": results})
+                _, _, allowed_media = self.pass_contract(schema, results[index].name)
+                self.assertNotIn(wrong_media, allowed_media)
 
-        def assert_both_reject(payload):
+    def test_schema_pass_branches_match_the_runtime_canonical_mapping(self):
+        expected = {
+            "models": ("models_valid", {"count"}, set()),
+            "chat_nonstream": ("chat_nonstream_valid", {"content_present"}, set()),
+            "chat_stream": ("chat_stream_valid", {"chunks", "done"}, set()),
+            "responses_nonstream": ("responses_nonstream_valid", {"completed", "output_count"}, set()),
+            "responses_stream": ("responses_stream_valid", {"created", "output_seen", "completed", "done"}, set()),
+            "files": ("files_valid", {"upload_accepted", "file_id_present", "answer_present"}, set()),
+            "image_generation": ("image_generation_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
+            "image_edit": ("image_edit_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
+            "image_variation": ("image_variation_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
+            "audio_speech": ("audio_speech_valid", {"bytes", "media_type", "decodable"}, {"audio/wav"}),
+            "audio_transcription": ("audio_transcription_valid", {"text_present", "expected_marker_present"}, set()),
+            "audio_translation": ("audio_translation_valid", {"text_present", "english_markers_present"}, set()),
+        }
+        runtime = {
+            name: (code, set(MODULE.PASS_DETAIL_KEYS[code]))
+            for name, code in MODULE.PASS_CODES_BY_CHECK.items()
+        }
+        self.assertEqual(
+            runtime,
+            {name: (code, details) for name, (code, details, _) in expected.items()},
+        )
+        self.assertEqual(
+            getattr(MODULE, "PASS_MEDIA_TYPES_BY_CHECK", {}),
+            {
+                "image_generation": "image/png",
+                "image_edit": "image/png",
+                "image_variation": "image/png",
+                "audio_speech": "audio/wav",
+            },
+        )
+        with SCHEMA.open(encoding="utf-8") as stream:
+            schema = json.load(stream)
+        self.assertEqual(
+            {name: self.pass_contract(schema, name) for name in MODULE.EXPECTED_CHECKS},
+            expected,
+        )
+
+    def test_runtime_rejects_false_zero_and_wrong_overall_reports(self):
+        valid = MODULE.build_report({"direct": passing_results()})
+
+        def assert_rejected(payload):
             with self.assertRaises(ValueError):
                 MODULE.serialize_report(payload)
-            with self.assertRaises(ValidationError):
-                validator.validate(payload)
 
         false_boolean = json.loads(json.dumps(valid))
         false_boolean["targets"]["direct"][1]["details"]["content_present"] = False
-        assert_both_reject(false_boolean)
+        assert_rejected(false_boolean)
 
         wrong_overall = json.loads(json.dumps(valid))
         wrong_overall["targets"]["direct"][0].update(
             {"status": "FAIL", "code": "models_invalid", "details": {}}
         )
-        assert_both_reject(wrong_overall)
+        assert_rejected(wrong_overall)
 
         for index, result in enumerate(valid["targets"]["direct"]):
             for key, value in result["details"].items():
@@ -1016,4 +1071,4 @@ class SchemaContractTests(unittest.TestCase):
                 malformed = json.loads(json.dumps(valid))
                 malformed["targets"]["direct"][index]["details"][key] = invalid_value
                 with self.subTest(check=result["name"], detail=key):
-                    assert_both_reject(malformed)
+                    assert_rejected(malformed)

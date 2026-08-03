@@ -146,17 +146,21 @@
         "answer_present": {"const": true}
       }
     },
-    "media_details": {
+    "image_media_details": {
       "type": "object", "additionalProperties": false,
       "required": ["bytes", "media_type", "decodable"],
       "properties": {
         "bytes": {"type": "integer", "minimum": 1},
-        "media_type": {
-          "enum": [
-            "image/png", "image/jpeg", "image/webp", "audio/wav", "audio/mpeg",
-            "audio/ogg", "audio/opus", "audio/flac", "audio/aac", "audio/webm"
-          ]
-        },
+        "media_type": {"const": "image/png"},
+        "decodable": {"const": true}
+      }
+    },
+    "audio_media_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "media_type", "decodable"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1},
+        "media_type": {"const": "audio/wav"},
         "decodable": {"const": true}
       }
     },
@@ -238,7 +242,7 @@
     "image_generation": {
       "allOf": [
         {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_generation"}}},
-        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_generation_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_generation_valid"}, "details": {"$ref": "#/$defs/image_media_details"}}}, "else": {"oneOf": [
           {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
@@ -248,7 +252,7 @@
     "image_edit": {
       "allOf": [
         {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_edit"}}},
-        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_edit_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_edit_valid"}, "details": {"$ref": "#/$defs/image_media_details"}}}, "else": {"oneOf": [
           {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
@@ -258,7 +262,7 @@
     "image_variation": {
       "allOf": [
         {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_variation"}}},
-        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_variation_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_variation_valid"}, "details": {"$ref": "#/$defs/image_media_details"}}}, "else": {"oneOf": [
           {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
@@ -268,7 +272,7 @@
     "audio_speech": {
       "allOf": [
         {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "audio_speech"}}},
-        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "audio_speech_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "audio_speech_valid"}, "details": {"$ref": "#/$defs/audio_media_details"}}}, "else": {"oneOf": [
           {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"const": "audio_payload_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
           {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
