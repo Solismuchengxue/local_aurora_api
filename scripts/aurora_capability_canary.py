@@ -293,31 +293,34 @@ def make_test_png() -> bytes:
     )
 
 
+def _is_mime_token(value: str) -> bool:
+    return bool(value) and all(char.isascii() and (char.isalnum() or char in "!#$%&'*+-.^_`|~") for char in value)
+
+
 def encode_multipart(
     *,
     fields: Mapping[str, str],
     files: Mapping[str, tuple[str, str, bytes]],
     boundary: str = "aurora-canary-boundary",
 ) -> tuple[str, bytes]:
-    if not boundary.isascii() or not boundary or any(char in boundary for char in "\r\n"):
+    if not _is_mime_token(boundary):
         raise ProbeError("multipart_invalid")
     chunks: list[bytes] = []
     marker = f"--{boundary}".encode("ascii")
     for name in sorted(fields):
         value = fields[name]
-        if not name.isascii() or not name or not isinstance(value, str) or "\r" in value or "\n" in value:
+        if not _is_mime_token(name) or not isinstance(value, str) or "\r" in value or "\n" in value:
             raise ProbeError("multipart_invalid")
         chunks.extend((marker, f'Content-Disposition: form-data; name="{name}"'.encode("ascii"), b"", value.encode("utf-8")))
     for name in sorted(files):
         filename, media_type, payload = files[name]
         if (
-            not name.isascii()
-            or not name
+            not _is_mime_token(name)
             or not filename.isascii()
             or not filename
             or any(char in filename for char in "\\/\r\n\"")
-            or not media_type.isascii()
-            or not media_type
+            or media_type.count("/") != 1
+            or not all(_is_mime_token(part) for part in media_type.split("/"))
             or not isinstance(payload, bytes)
         ):
             raise ProbeError("multipart_invalid")
@@ -339,8 +342,10 @@ def decode_image_result(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
         raise ProbeError("image_payload_invalid")
     item = data[0]
-    if "url" in item and "b64_json" not in item:
+    if "url" in item:
         raise ProbeError("image_url_not_accepted")
+    if set(item) != {"b64_json"}:
+        raise ProbeError("image_payload_invalid")
     encoded = item.get("b64_json")
     if not isinstance(encoded, str):
         raise ProbeError("image_payload_invalid")

@@ -394,6 +394,25 @@ class MultipartAndImageHelperTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "request_too_large")
 
+    def test_multipart_rejects_unsafe_header_fragments_without_echoing_them(self):
+        for fields, files, boundary in (
+            ({"field\r\nX-Injected: 1": "value"}, {}, "aurora-canary-boundary"),
+            ({'field"name': "value"}, {}, "aurora-canary-boundary"),
+            ({"field\x1fname": "value"}, {}, "aurora-canary-boundary"),
+            ({}, {"image": ("source.png", "image/png\r\nX-Injected: 1", b"x")}, "aurora-canary-boundary"),
+            ({}, {"image": ("source.png", 'image/"png', b"x")}, "aurora-canary-boundary"),
+            ({}, {"image": ("source.png", "image/png; charset=utf-8", b"x")}, "aurora-canary-boundary"),
+            ({}, {"image": ("source.png", "image/\x1fpng", b"x")}, "aurora-canary-boundary"),
+            ({}, {}, "aurora\r\nX-Injected: 1"),
+            ({}, {}, 'aurora"boundary'),
+            ({}, {}, "aurora;boundary"),
+            ({}, {}, "aurora\x1fboundary"),
+        ):
+            with self.subTest(fields=bool(fields), files=bool(files), boundary=repr(boundary)):
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.encode_multipart(fields=fields, files=files, boundary=boundary)
+                self.assertEqual((raised.exception.code, str(raised.exception)), ("multipart_invalid", "multipart_invalid"))
+
 
 def image_json(image: bytes) -> bytes:
     return json.dumps({"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}).encode("utf-8")
@@ -421,8 +440,31 @@ class ImageCapabilityTests(unittest.TestCase):
             self.target,
             lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"data":[{"url":"https://example.invalid/private"}]}'),
         )
+        mixed_url = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(
+                200,
+                {},
+                json.dumps({"data": [{"url": "https://example.invalid/private", "b64_json": base64.b64encode(MODULE.make_test_png()).decode("ascii")}]}).encode("utf-8"),
+            ),
+        )
         self.assertEqual((malformed.status, malformed.code, malformed.details), ("FAIL", "image_payload_invalid", {}))
         self.assertEqual((url_only.status, url_only.code, url_only.details), ("FAIL", "image_url_not_accepted", {}))
+        self.assertEqual((mixed_url.status, mixed_url.code, mixed_url.details), ("FAIL", "image_url_not_accepted", {}))
+
+    def test_image_results_accept_minimal_png_jpeg_and_webp_signatures(self):
+        for image, media_type in (
+            (MODULE.make_test_png(), "image/png"),
+            (b"\xff\xd8\xff\x00", "image/jpeg"),
+            (b"RIFF\x04\x00\x00\x00WEBP", "image/webp"),
+        ):
+            with self.subTest(media_type=media_type):
+                result = MODULE.check_image_generation(
+                    self.target,
+                    lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(image)),
+                )
+                self.assertEqual((result.status, result.code), ("PASS", "image_generation_valid"))
+                self.assertEqual(result.details, {"bytes": len(image), "media_type": media_type, "decodable": True})
 
     def test_image_requests_use_the_expected_json_and_multipart_contracts(self):
         calls = []
