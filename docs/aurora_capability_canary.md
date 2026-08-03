@@ -49,6 +49,8 @@ Windows 主机应通过 WSL 运行同一条命令；该检查只验证 Compose �
 
 在 isolated canary 已创建且获得每次真实调用的独立批准后，必须先执行 direct；仅在全部 PASS 后再执行 both：
 
+在任何经批准的 canary 初始化或真实执行之前，受控且另行授权的初始化步骤必须预先创建 `data/canary/evidence/`，并核对其属主和权限。当前本地计划不创建该目录；工具刻意 fail closed，绝不自动创建缺失的父目录。
+
 ```bash
 python3 scripts/aurora_capability_canary.py --allow-real-api --target direct --json
 python3 scripts/aurora_capability_canary.py --allow-real-api --target both --output data/canary/evidence/latest-capability.json --json
