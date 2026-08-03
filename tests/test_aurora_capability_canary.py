@@ -217,6 +217,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(result, MODULE.HttpResponse(401, {}, b""))
         error.read.assert_not_called()
 
+    def test_http_request_maps_local_transport_exceptions_to_fixed_codes(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        cases = (
+            (TimeoutError("synthetic timeout"), "timeout"),
+            (OSError("synthetic socket failure"), "connectivity_failed"),
+            (MODULE.urllib.error.URLError("synthetic url failure"), "connectivity_failed"),
+            (MODULE.http.client.HTTPException("synthetic protocol failure"), "connectivity_failed"),
+        )
+        for error, code in cases:
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                MODULE.urllib.request, "urlopen", side_effect=error
+            ) as urlopen, self.assertRaises(MODULE.ProbeError) as raised:
+                MODULE.http_request(target, "GET", "/v1/models")
+            self.assertEqual(raised.exception.code, code)
+            urlopen.assert_called_once()
+
     def test_non_2xx_is_classified_without_response_body(self):
         cases = {
             401: "auth_failed",
