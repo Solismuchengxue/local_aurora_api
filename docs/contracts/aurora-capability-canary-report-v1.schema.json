@@ -21,106 +21,254 @@
   "$defs": {
     "results": {
       "type": "array",
-      "items": {"$ref": "#/$defs/check"}
+      "minItems": 12,
+      "maxItems": 12,
+      "prefixItems": [
+        {"$ref": "#/$defs/models"},
+        {"$ref": "#/$defs/chat_nonstream"},
+        {"$ref": "#/$defs/chat_stream"},
+        {"$ref": "#/$defs/responses_nonstream"},
+        {"$ref": "#/$defs/responses_stream"},
+        {"$ref": "#/$defs/files"},
+        {"$ref": "#/$defs/image_generation"},
+        {"$ref": "#/$defs/image_edit"},
+        {"$ref": "#/$defs/image_variation"},
+        {"$ref": "#/$defs/audio_speech"},
+        {"$ref": "#/$defs/audio_transcription"},
+        {"$ref": "#/$defs/audio_translation"}
+      ],
+      "items": false
     },
     "check": {
+      "oneOf": [
+        {"$ref": "#/$defs/models"},
+        {"$ref": "#/$defs/chat_nonstream"},
+        {"$ref": "#/$defs/chat_stream"},
+        {"$ref": "#/$defs/responses_nonstream"},
+        {"$ref": "#/$defs/responses_stream"},
+        {"$ref": "#/$defs/files"},
+        {"$ref": "#/$defs/image_generation"},
+        {"$ref": "#/$defs/image_edit"},
+        {"$ref": "#/$defs/image_variation"},
+        {"$ref": "#/$defs/audio_speech"},
+        {"$ref": "#/$defs/audio_transcription"},
+        {"$ref": "#/$defs/audio_translation"}
+      ]
+    },
+    "check_base": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "status", "code", "details"],
       "properties": {
-        "name": {
-          "enum": [
-            "models",
-            "chat_nonstream",
-            "chat_stream",
-            "responses_nonstream",
-            "responses_stream",
-            "files",
-            "image_generation",
-            "image_edit",
-            "image_variation",
-            "audio_speech",
-            "audio_transcription",
-            "audio_translation"
-          ]
-        },
+        "name": {"type": "string"},
         "status": {"enum": ["PASS", "FAIL"]},
-        "code": {
+        "code": {"type": "string"},
+        "details": {}
+      }
+    },
+    "transport_code": {
+      "enum": [
+        "auth_failed", "upstream_forbidden", "route_missing", "rate_limited",
+        "upstream_failed", "http_failed", "timeout", "connectivity_failed",
+        "response_too_large"
+      ]
+    },
+    "empty_details": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "direct_dependency_details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dependency"],
+      "properties": {"dependency": {"const": "direct"}}
+    },
+    "audio_dependency_details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dependency"],
+      "properties": {"dependency": {"enum": ["direct", "audio_speech"]}}
+    },
+    "models_valid_details": {
+      "type": "object", "additionalProperties": false, "required": ["count"],
+      "properties": {"count": {"type": "integer", "minimum": 0}}
+    },
+    "chat_nonstream_valid_details": {
+      "type": "object", "additionalProperties": false, "required": ["content_present"],
+      "properties": {"content_present": {"const": true}}
+    },
+    "chat_stream_valid_details": {
+      "type": "object", "additionalProperties": false, "required": ["chunks", "done"],
+      "properties": {"chunks": {"type": "integer", "minimum": 0}, "done": {"const": true}}
+    },
+    "responses_nonstream_valid_details": {
+      "type": "object", "additionalProperties": false, "required": ["completed", "output_count"],
+      "properties": {"completed": {"const": true}, "output_count": {"type": "integer", "minimum": 0}}
+    },
+    "responses_stream_valid_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["created", "output_seen", "completed", "done"],
+      "properties": {
+        "created": {"const": true}, "output_seen": {"const": true},
+        "completed": {"const": true}, "done": {"const": true}
+      }
+    },
+    "files_valid_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["upload_accepted", "file_id_present", "answer_present"],
+      "properties": {
+        "upload_accepted": {"const": true}, "file_id_present": {"const": true},
+        "answer_present": {"const": true}
+      }
+    },
+    "media_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "media_type", "decodable"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 0},
+        "media_type": {
           "enum": [
-            "models_valid",
-            "chat_nonstream_valid",
-            "chat_stream_valid",
-            "responses_nonstream_valid",
-            "responses_stream_valid",
-            "files_valid",
-            "image_generation_valid",
-            "image_edit_valid",
-            "image_variation_valid",
-            "audio_speech_valid",
-            "audio_transcription_valid",
-            "audio_translation_valid",
-            "auth_failed",
-            "upstream_forbidden",
-            "route_missing",
-            "rate_limited",
-            "upstream_failed",
-            "http_failed",
-            "timeout",
-            "connectivity_failed",
-            "response_too_large",
-            "models_invalid",
-            "chat_nonstream_invalid",
-            "chat_empty",
-            "chat_stream_invalid",
-            "responses_nonstream_invalid",
-            "responses_stream_invalid",
-            "files_invalid",
-            "image_payload_invalid",
-            "image_url_not_accepted",
-            "audio_payload_invalid",
-            "transcription_mismatch",
-            "translation_mismatch",
-            "dependency_failed"
+            "image/png", "image/jpeg", "image/webp", "audio/wav", "audio/mpeg",
+            "audio/ogg", "audio/opus", "audio/flac", "audio/aac", "audio/webm"
           ]
         },
-        "details": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "count": {"type": "integer", "minimum": 0},
-            "chunks": {"type": "integer", "minimum": 0},
-            "output_count": {"type": "integer", "minimum": 0},
-            "bytes": {"type": "integer", "minimum": 0},
-            "content_present": {"type": "boolean"},
-            "done": {"type": "boolean"},
-            "completed": {"type": "boolean"},
-            "created": {"type": "boolean"},
-            "output_seen": {"type": "boolean"},
-            "upload_accepted": {"type": "boolean"},
-            "file_id_present": {"type": "boolean"},
-            "answer_present": {"type": "boolean"},
-            "decodable": {"type": "boolean"},
-            "text_present": {"type": "boolean"},
-            "expected_marker_present": {"type": "boolean"},
-            "english_markers_present": {"type": "boolean"},
-            "media_type": {
-              "enum": [
-                "image/png",
-                "image/jpeg",
-                "image/webp",
-                "audio/wav",
-                "audio/mpeg",
-                "audio/ogg",
-                "audio/opus",
-                "audio/flac",
-                "audio/aac",
-                "audio/webm"
-              ]
-            },
-            "dependency": {"enum": ["direct", "audio_speech"]}
-          }
-        }
+        "decodable": {"const": true}
       }
+    },
+    "audio_transcription_valid_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["text_present", "expected_marker_present"],
+      "properties": {"text_present": {"const": true}, "expected_marker_present": {"const": true}}
+    },
+    "audio_translation_valid_details": {
+      "type": "object", "additionalProperties": false,
+      "required": ["text_present", "english_markers_present"],
+      "properties": {"text_present": {"const": true}, "english_markers_present": {"const": true}}
+    },
+    "models": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"},
+        {"properties": {"name": {"const": "models"}}},
+        {
+          "if": {"properties": {"status": {"const": "PASS"}}},
+          "then": {"properties": {"code": {"const": "models_valid"}, "details": {"$ref": "#/$defs/models_valid_details"}}},
+          "else": {"oneOf": [
+            {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+            {"properties": {"code": {"const": "models_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+            {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+          ]}
+        }
+      ]
+    },
+    "chat_nonstream": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "chat_nonstream"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "chat_nonstream_valid"}, "details": {"$ref": "#/$defs/chat_nonstream_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["chat_nonstream_invalid", "chat_empty"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "chat_stream": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "chat_stream"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "chat_stream_valid"}, "details": {"$ref": "#/$defs/chat_stream_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "chat_stream_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "responses_nonstream": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "responses_nonstream"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "responses_nonstream_valid"}, "details": {"$ref": "#/$defs/responses_nonstream_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "responses_nonstream_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "responses_stream": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "responses_stream"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "responses_stream_valid"}, "details": {"$ref": "#/$defs/responses_stream_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "responses_stream_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "files": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "files"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "files_valid"}, "details": {"$ref": "#/$defs/files_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "files_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "image_generation": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_generation"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_generation_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "image_edit": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_edit"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_edit_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "image_variation": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "image_variation"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "image_variation_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["image_payload_invalid", "image_url_not_accepted"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "audio_speech": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "audio_speech"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "audio_speech_valid"}, "details": {"$ref": "#/$defs/media_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "audio_payload_invalid"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/direct_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "audio_transcription": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "audio_transcription"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "audio_transcription_valid"}, "details": {"$ref": "#/$defs/audio_transcription_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["audio_payload_invalid", "transcription_mismatch"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/audio_dependency_details"}}}
+        ]}}
+      ]
+    },
+    "audio_translation": {
+      "allOf": [
+        {"$ref": "#/$defs/check_base"}, {"properties": {"name": {"const": "audio_translation"}}},
+        {"if": {"properties": {"status": {"const": "PASS"}}}, "then": {"properties": {"code": {"const": "audio_translation_valid"}, "details": {"$ref": "#/$defs/audio_translation_valid_details"}}}, "else": {"oneOf": [
+          {"properties": {"code": {"$ref": "#/$defs/transport_code"}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"enum": ["audio_payload_invalid", "translation_mismatch"]}, "details": {"$ref": "#/$defs/empty_details"}}},
+          {"properties": {"code": {"const": "dependency_failed"}, "details": {"$ref": "#/$defs/audio_dependency_details"}}}
+        ]}}
+      ]
     }
   }
 }

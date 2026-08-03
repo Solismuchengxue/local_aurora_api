@@ -98,19 +98,16 @@ class SafetyGateTests(unittest.TestCase):
 
 class SanitizedReportTests(unittest.TestCase):
     def test_report_keeps_only_allowlisted_boolean_count_and_media_details(self):
+        results = passing_results()
+        results[5] = MODULE.CheckResult("files", "FAIL", "route_missing", {})
+        results[6] = MODULE.CheckResult(
+            "image_generation",
+            "PASS",
+            "image_generation_valid",
+            {"bytes": 12, "media_type": "image/png", "decodable": True},
+        )
         report = MODULE.build_report(
-            {
-                "direct": [
-                    MODULE.CheckResult("models", "PASS", "models_valid", {"count": 2}),
-                    MODULE.CheckResult(
-                        "image_generation",
-                        "PASS",
-                        "image_generation_valid",
-                        {"bytes": 12, "media_type": "image/png", "decodable": True},
-                    ),
-                    MODULE.CheckResult("files", "FAIL", "route_missing", {}),
-                ]
-            },
+            {"direct": results},
             datetime(2026, 8, 3, 5, 0, tzinfo=timezone.utc),
         )
         parsed = json.loads(MODULE.serialize_report(report))
@@ -118,9 +115,40 @@ class SanitizedReportTests(unittest.TestCase):
         self.assertEqual(parsed["checked_at"], "2026-08-03T05:00:00Z")
         self.assertEqual(parsed["overall"], "FAIL")
         self.assertEqual(
-            parsed["targets"]["direct"][1]["details"],
+            parsed["targets"]["direct"][6]["details"],
             {"bytes": 12, "media_type": "image/png", "decodable": True},
         )
+
+    def test_report_rejects_sparse_out_of_order_and_duplicate_target_results(self):
+        sparse = passing_results()[:1]
+        out_of_order = passing_results()
+        out_of_order[0], out_of_order[1] = out_of_order[1], out_of_order[0]
+        duplicate = passing_results()
+        duplicate[1] = duplicate[0]
+        for results in (sparse, out_of_order, duplicate):
+            with self.subTest(results=[result.name for result in results]):
+                with self.assertRaises(ValueError):
+                    MODULE.build_report({"direct": results})
+
+    def test_report_rejects_name_status_code_and_detail_mismatches(self):
+        invalid_results = []
+        wrong_name_code = passing_results()
+        wrong_name_code[0] = MODULE.CheckResult(
+            "models", "PASS", "chat_nonstream_valid", {"content_present": True}
+        )
+        invalid_results.append(wrong_name_code)
+        wrong_status_code = passing_results()
+        wrong_status_code[0] = MODULE.CheckResult("models", "FAIL", "models_valid", {})
+        invalid_results.append(wrong_status_code)
+        wrong_details = passing_results()
+        wrong_details[0] = MODULE.CheckResult(
+            "models", "PASS", "models_valid", {"content_present": True}
+        )
+        invalid_results.append(wrong_details)
+        for results in invalid_results:
+            with self.subTest(result=results[0]):
+                with self.assertRaises(ValueError):
+                    MODULE.build_report({"direct": results})
 
     def test_report_rejects_unallowlisted_or_non_sanitized_details(self):
         with self.assertRaises(ValueError):
@@ -761,20 +789,43 @@ class MatrixOrchestrationTests(unittest.TestCase):
                 MODULE.atomic_write(root / "missing" / "report.json", b"new")
             self.assertEqual(raised.exception.code, "output_parent_invalid")
 
+    def test_cli_maps_atomic_replace_failure_to_a_fixed_error_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            output.write_bytes(b"old")
+            stderr = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(MODULE, "read_env_value", return_value="direct-secret"),
+                    mock.patch.object(MODULE, "run_target", return_value=passing_results()),
+                    mock.patch.object(MODULE.os, "replace", side_effect=OSError("synthetic output failure")),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    exit_code = MODULE.main([
+                        "--allow-real-api", "--target", "direct", "--output", str(output)
+                    ])
+            except OSError:
+                exit_code = None
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr.getvalue(), "aurora_canary=ERROR code=output_write_failed\n")
+            self.assertEqual(output.read_bytes(), b"old")
+            self.assertEqual({item.name for item in output.parent.iterdir()}, {"report.json"})
+
 
 class SchemaContractTests(unittest.TestCase):
-    def test_report_schema_locks_required_names_and_sanitized_enums(self):
+    def test_report_schema_locks_exact_order_and_sanitized_variants(self):
         with SCHEMA.open(encoding="utf-8") as stream:
             schema = json.load(stream)
         self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertEqual(set(schema["required"]), {"schema_version", "checked_at", "overall", "targets"})
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(schema["properties"]["targets"]["properties"]), {"direct", "gateway"})
-        check = schema["$defs"]["check"]
-        self.assertEqual(set(check["properties"]["name"]["enum"]), set(MODULE.EXPECTED_CHECKS))
-        self.assertEqual(set(check["properties"]["status"]["enum"]), {"PASS", "FAIL"})
+        results = schema["$defs"]["results"]
+        self.assertEqual((results.get("minItems"), results.get("maxItems"), results.get("items")), (12, 12, False))
         self.assertEqual(
-            set(check["properties"]["code"]["enum"]),
-            MODULE.TRANSPORT_ERROR_CODES | MODULE.STRUCTURE_ERROR_CODES | set(MODULE.PASS_DETAIL_KEYS),
+            [item.get("$ref", "").removeprefix("#/$defs/") for item in results.get("prefixItems", [])],
+            list(MODULE.EXPECTED_CHECKS),
         )
-        self.assertFalse(check["additionalProperties"])
+        check = schema["$defs"].get("check", {})
+        self.assertEqual(len(check.get("oneOf", [])), 12)

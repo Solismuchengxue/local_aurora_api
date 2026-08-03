@@ -87,6 +87,46 @@ STRUCTURE_ERROR_CODES = {
     "dependency_failed",
 }
 FAIL_DETAIL_KEYS = {"dependency_failed": {"dependency"}}
+PASS_CODES_BY_CHECK = {
+    "models": "models_valid",
+    "chat_nonstream": "chat_nonstream_valid",
+    "chat_stream": "chat_stream_valid",
+    "responses_nonstream": "responses_nonstream_valid",
+    "responses_stream": "responses_stream_valid",
+    "files": "files_valid",
+    "image_generation": "image_generation_valid",
+    "image_edit": "image_edit_valid",
+    "image_variation": "image_variation_valid",
+    "audio_speech": "audio_speech_valid",
+    "audio_transcription": "audio_transcription_valid",
+    "audio_translation": "audio_translation_valid",
+}
+FAIL_CODES_BY_CHECK = {
+    "models": {"models_invalid"},
+    "chat_nonstream": {"chat_nonstream_invalid", "chat_empty"},
+    "chat_stream": {"chat_stream_invalid"},
+    "responses_nonstream": {"responses_nonstream_invalid"},
+    "responses_stream": {"responses_stream_invalid"},
+    "files": {"files_invalid"},
+    "image_generation": {"image_payload_invalid", "image_url_not_accepted"},
+    "image_edit": {"image_payload_invalid", "image_url_not_accepted"},
+    "image_variation": {"image_payload_invalid", "image_url_not_accepted"},
+    "audio_speech": {"audio_payload_invalid"},
+    "audio_transcription": {"audio_payload_invalid", "transcription_mismatch"},
+    "audio_translation": {"audio_payload_invalid", "translation_mismatch"},
+}
+OUTPUT_WRITE_FAILED = "output_write_failed"
+CLI_ERROR_CODES = {
+    "real_api_not_authorized",
+    "credential_unavailable",
+    "credential_invalid",
+    "report_too_large",
+    "invalid_check_order",
+    "invalid_target_mode",
+    "output_parent_invalid",
+    "output_target_invalid",
+    OUTPUT_WRITE_FAILED,
+}
 MEDIA_TYPES = {
     "image/png",
     "image/jpeg",
@@ -636,14 +676,16 @@ def _validate_result(result: CheckResult) -> None:
     if result.name not in EXPECTED_CHECKS:
         raise ValueError("invalid check name")
     if result.status == "PASS":
-        expected_details = PASS_DETAIL_KEYS.get(result.code)
-    elif result.code in TRANSPORT_ERROR_CODES:
-        expected_details = set()
+        expected_code = PASS_CODES_BY_CHECK[result.name]
+        expected_details = PASS_DETAIL_KEYS[expected_code]
+        if result.code != expected_code:
+            raise ValueError("invalid result code")
     else:
-        expected_details = FAIL_DETAIL_KEYS.get(result.code)
-        if expected_details is None and result.code in STRUCTURE_ERROR_CODES:
-            expected_details = set()
-    if expected_details is None or set(result.details) != expected_details:
+        allowed_codes = TRANSPORT_ERROR_CODES | FAIL_CODES_BY_CHECK[result.name] | {"dependency_failed"}
+        if result.code not in allowed_codes:
+            raise ValueError("invalid result code")
+        expected_details = FAIL_DETAIL_KEYS["dependency_failed"] if result.code == "dependency_failed" else set()
+    if set(result.details) != expected_details:
         raise ValueError("invalid result details")
     for key, value in result.details.items():
         if key in {"count", "chunks", "output_count", "bytes"}:
@@ -653,7 +695,10 @@ def _validate_result(result: CheckResult) -> None:
             if value not in MEDIA_TYPES:
                 raise ValueError("invalid result details")
         elif key == "dependency":
-            if value not in {"direct", "audio_speech"}:
+            dependencies = {"direct"}
+            if result.name in {"audio_transcription", "audio_translation"}:
+                dependencies.add("audio_speech")
+            if value not in dependencies:
                 raise ValueError("invalid result details")
         elif not isinstance(value, bool):
             raise ValueError("invalid result details")
@@ -691,6 +736,8 @@ def _validate_report(report: Mapping[str, object]) -> dict[str, object]:
             _validate_result(result)
             sanitized_results.append(asdict(result))
             statuses.append(result.status)
+        if tuple(item["name"] for item in sanitized_results) != EXPECTED_CHECKS:
+            raise ValueError("invalid report")
         sanitized_targets[name] = sanitized_results
     expected_overall = "PASS" if statuses and all(status == "PASS" for status in statuses) else "FAIL"
     if report["overall"] != expected_overall:
@@ -806,6 +853,8 @@ def atomic_write(output: Path, payload: bytes) -> None:
         target_metadata = output.lstat()
     except FileNotFoundError:
         target_metadata = None
+    except OSError as exc:
+        raise ProbeError("output_target_invalid") from exc
     if target_metadata is not None and (
         output.is_symlink() or not stat.S_ISREG(target_metadata.st_mode)
     ):
@@ -833,14 +882,24 @@ def atomic_write(output: Path, payload: bytes) -> None:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+    except OSError as exc:
+        raise ProbeError(OUTPUT_WRITE_FAILED) from exc
     finally:
+        cleanup_error: OSError | None = None
         if descriptor >= 0:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_error = exc
         if temporary is not None:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise ProbeError(OUTPUT_WRITE_FAILED) from cleanup_error
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -889,7 +948,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"aurora_canary={report['overall']}")
         return 0 if all(result.status == "PASS" for results in targets.values() for result in results) else 1
     except ProbeError as exc:
-        print(f"aurora_canary=ERROR code={exc.code}", file=sys.stderr)
+        code = exc.code if exc.code in CLI_ERROR_CODES else "canary_failed"
+        print(f"aurora_canary=ERROR code={code}", file=sys.stderr)
         return 2
     except ValueError:
         print("aurora_canary=ERROR code=invalid_report", file=sys.stderr)
