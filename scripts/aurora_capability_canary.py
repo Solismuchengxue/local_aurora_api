@@ -689,7 +689,7 @@ def _validate_result(result: CheckResult) -> None:
         raise ValueError("invalid result details")
     for key, value in result.details.items():
         if key in {"count", "chunks", "output_count", "bytes"}:
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError("invalid result details")
         elif key == "media_type":
             if value not in MEDIA_TYPES:
@@ -700,7 +700,7 @@ def _validate_result(result: CheckResult) -> None:
                 dependencies.add("audio_speech")
             if value not in dependencies:
                 raise ValueError("invalid result details")
-        elif not isinstance(value, bool):
+        elif not isinstance(value, bool) or not value:
             raise ValueError("invalid result details")
 
 
@@ -845,8 +845,10 @@ def atomic_write(output: Path, payload: bytes) -> None:
     parent = output.parent
     try:
         metadata = parent.lstat()
-    except OSError as exc:
+    except FileNotFoundError as exc:
         raise ProbeError("output_parent_invalid") from exc
+    except OSError as exc:
+        raise ProbeError(OUTPUT_WRITE_FAILED) from exc
     if parent.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
         raise ProbeError("output_parent_invalid")
     try:
@@ -854,7 +856,7 @@ def atomic_write(output: Path, payload: bytes) -> None:
     except FileNotFoundError:
         target_metadata = None
     except OSError as exc:
-        raise ProbeError("output_target_invalid") from exc
+        raise ProbeError(OUTPUT_WRITE_FAILED) from exc
     if target_metadata is not None and (
         output.is_symlink() or not stat.S_ISREG(target_metadata.st_mode)
     ):

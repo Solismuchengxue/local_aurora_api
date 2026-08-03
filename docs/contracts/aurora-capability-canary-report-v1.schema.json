@@ -18,6 +18,16 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"overall": {"const": "PASS"}}},
+      "then": {"properties": {"targets": {"$ref": "#/$defs/pass_targets"}}}
+    },
+    {
+      "if": {"properties": {"overall": {"const": "FAIL"}}},
+      "then": {"not": {"properties": {"targets": {"$ref": "#/$defs/pass_targets"}}}}
+    }
+  ],
   "$defs": {
     "results": {
       "type": "array",
@@ -55,6 +65,21 @@
         {"$ref": "#/$defs/audio_translation"}
       ]
     },
+    "pass_results": {
+      "allOf": [
+        {"$ref": "#/$defs/results"},
+        {"not": {"contains": {"properties": {"status": {"const": "FAIL"}}}}}
+      ]
+    },
+    "pass_targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "direct": {"$ref": "#/$defs/pass_results"},
+        "gateway": {"$ref": "#/$defs/pass_results"}
+      }
+    },
     "check_base": {
       "type": "object",
       "additionalProperties": false,
@@ -91,7 +116,7 @@
     },
     "models_valid_details": {
       "type": "object", "additionalProperties": false, "required": ["count"],
-      "properties": {"count": {"type": "integer", "minimum": 0}}
+      "properties": {"count": {"type": "integer", "minimum": 1}}
     },
     "chat_nonstream_valid_details": {
       "type": "object", "additionalProperties": false, "required": ["content_present"],
@@ -99,11 +124,11 @@
     },
     "chat_stream_valid_details": {
       "type": "object", "additionalProperties": false, "required": ["chunks", "done"],
-      "properties": {"chunks": {"type": "integer", "minimum": 0}, "done": {"const": true}}
+      "properties": {"chunks": {"type": "integer", "minimum": 1}, "done": {"const": true}}
     },
     "responses_nonstream_valid_details": {
       "type": "object", "additionalProperties": false, "required": ["completed", "output_count"],
-      "properties": {"completed": {"const": true}, "output_count": {"type": "integer", "minimum": 0}}
+      "properties": {"completed": {"const": true}, "output_count": {"type": "integer", "minimum": 1}}
     },
     "responses_stream_valid_details": {
       "type": "object", "additionalProperties": false,
@@ -125,7 +150,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["bytes", "media_type", "decodable"],
       "properties": {
-        "bytes": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 1},
         "media_type": {
           "enum": [
             "image/png", "image/jpeg", "image/webp", "audio/wav", "audio/mpeg",

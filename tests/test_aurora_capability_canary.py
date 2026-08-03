@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 import wave
+from jsonschema import Draft202012Validator, ValidationError
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aurora_capability_canary.py"
@@ -812,6 +813,32 @@ class MatrixOrchestrationTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"old")
             self.assertEqual({item.name for item in output.parent.iterdir()}, {"report.json"})
 
+    def test_cli_maps_parent_and_target_lstat_errors_to_the_write_failure_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            original_lstat = Path.lstat
+
+            def target_lstat(path):
+                if path == output:
+                    raise OSError("synthetic target metadata failure")
+                return original_lstat(path)
+
+            for side_effect in (OSError("synthetic parent metadata failure"), target_lstat):
+                with self.subTest(side_effect=repr(side_effect)):
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(MODULE, "read_env_value", return_value="direct-secret"),
+                        mock.patch.object(MODULE, "run_target", return_value=passing_results()),
+                        mock.patch.object(Path, "lstat", autospec=True, side_effect=side_effect),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        exit_code = MODULE.main([
+                            "--allow-real-api", "--target", "direct", "--output", str(output)
+                        ])
+                    self.assertEqual(exit_code, 2)
+                    self.assertEqual(stderr.getvalue(), "aurora_canary=ERROR code=output_write_failed\n")
+
 
 class SchemaContractTests(unittest.TestCase):
     def test_report_schema_locks_exact_order_and_sanitized_variants(self):
@@ -829,3 +856,41 @@ class SchemaContractTests(unittest.TestCase):
         )
         check = schema["$defs"].get("check", {})
         self.assertEqual(len(check.get("oneOf", [])), 12)
+
+    def test_draft_validator_and_runtime_agree_on_report_semantics(self):
+        with SCHEMA.open(encoding="utf-8") as stream:
+            validator = Draft202012Validator(json.load(stream))
+        valid = MODULE.build_report(
+            {"direct": passing_results()}, datetime(2026, 8, 3, 5, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(MODULE.serialize_report(valid), json.dumps(valid, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+        validator.validate(valid)
+
+        def assert_both_reject(payload):
+            with self.assertRaises(ValueError):
+                MODULE.serialize_report(payload)
+            with self.assertRaises(ValidationError):
+                validator.validate(payload)
+
+        false_boolean = json.loads(json.dumps(valid))
+        false_boolean["targets"]["direct"][1]["details"]["content_present"] = False
+        assert_both_reject(false_boolean)
+
+        wrong_overall = json.loads(json.dumps(valid))
+        wrong_overall["targets"]["direct"][0].update(
+            {"status": "FAIL", "code": "models_invalid", "details": {}}
+        )
+        assert_both_reject(wrong_overall)
+
+        for index, result in enumerate(valid["targets"]["direct"]):
+            for key, value in result["details"].items():
+                if isinstance(value, bool):
+                    invalid_value = False
+                elif isinstance(value, int):
+                    invalid_value = 0
+                else:
+                    continue
+                malformed = json.loads(json.dumps(valid))
+                malformed["targets"]["direct"][index]["details"][key] = invalid_value
+                with self.subTest(check=result["name"], detail=key):
+                    assert_both_reject(malformed)
