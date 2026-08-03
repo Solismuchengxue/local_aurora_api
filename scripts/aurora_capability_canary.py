@@ -249,6 +249,14 @@ def require_success(response: HttpResponse) -> HttpResponse:
     raise ProbeError(mapping.get(response.status, "http_failed"))
 
 
+def require_event_stream(response: HttpResponse) -> HttpResponse:
+    response = require_success(response)
+    content_type = response.headers.get("content-type")
+    if not isinstance(content_type, str) or content_type.split(";", 1)[0].strip().lower() != "text/event-stream":
+        raise ProbeError("sse_invalid")
+    return response
+
+
 def decode_json(response: HttpResponse) -> dict[str, object]:
     if len(response.body) > MAX_JSON_BYTES:
         raise ProbeError("json_too_large")
@@ -686,7 +694,7 @@ def check_chat_nonstream(target: TargetConfig, transport: Transport = http_reque
 
 def check_chat_stream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
     try:
-        response = require_success(transport(target, "POST", "/v1/chat/completions", body=_json_body({"model": "gpt-5-6-pro", "messages": [{"role": "user", "content": CHAT_PROMPT}], "stream": True}), content_type="application/json"))
+        response = require_event_stream(transport(target, "POST", "/v1/chat/completions", body=_json_body({"model": "gpt-5-6-pro", "messages": [{"role": "user", "content": CHAT_PROMPT}], "stream": True}), content_type="application/json"))
         events = parse_sse(response.body)
         chunks = sum(
             1
@@ -717,7 +725,7 @@ def check_responses_nonstream(target: TargetConfig, transport: Transport = http_
 
 def check_responses_stream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
     try:
-        response = require_success(transport(target, "POST", "/v1/responses", body=_json_body({"model": "gpt-5-6-pro", "input": RESPONSES_INPUT, "stream": True}), content_type="application/json"))
+        response = require_event_stream(transport(target, "POST", "/v1/responses", body=_json_body({"model": "gpt-5-6-pro", "input": RESPONSES_INPUT, "stream": True}), content_type="application/json"))
         events = parse_sse(response.body)
         names = []
         for name, payload in events:

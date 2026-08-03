@@ -359,6 +359,55 @@ class TextCapabilityTests(unittest.TestCase):
         result = MODULE.check_chat_stream(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code, result.details), ("FAIL", "chat_stream_invalid", {}))
 
+    def test_stream_checks_reject_missing_or_wrong_content_type_for_both_targets(self):
+        targets = (
+            MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret"),
+            MODULE.TargetConfig("gateway", MODULE.GATEWAY_BASE_URL, "secret"),
+        )
+        checks = (
+            (
+                MODULE.check_chat_stream,
+                b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n',
+                "chat_stream_invalid",
+            ),
+            (
+                MODULE.check_responses_stream,
+                b'event: response.created\ndata: {"type":"response.created"}\n\n'
+                b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+                b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+                b'data: [DONE]\n\n',
+                "responses_stream_invalid",
+            ),
+        )
+        for target in targets:
+            for check, body, code in checks:
+                for headers in ({}, {"content-type": "application/json"}):
+                    with self.subTest(target=target.name, check=check.__name__, headers=headers):
+                        result = check(target, self.transport_for(MODULE.HttpResponse(200, headers, body)))
+                    self.assertEqual((result.status, result.code, result.details), ("FAIL", code, {}))
+
+    def test_stream_checks_accept_normalized_event_stream_with_charset(self):
+        cases = (
+            (
+                MODULE.check_chat_stream,
+                b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n',
+                ("PASS", "chat_stream_valid", {"chunks": 1, "done": True}),
+            ),
+            (
+                MODULE.check_responses_stream,
+                b'event: response.created\ndata: {"type":"response.created"}\n\n'
+                b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+                b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+                b'data: [DONE]\n\n',
+                ("PASS", "responses_stream_valid", {"created": True, "output_seen": True, "completed": True, "done": True}),
+            ),
+        )
+        for check, body, expected in cases:
+            with self.subTest(check=check.__name__):
+                response = MODULE.HttpResponse(200, {"content-type": " Text/Event-Stream ; charset=utf-8"}, body)
+                result = check(self.target, self.transport_for(response))
+            self.assertEqual((result.status, result.code, result.details), expected)
+
     def test_responses_nonstream_requires_completed_output(self):
         response = MODULE.HttpResponse(
             200, {}, b'{"status":"completed","output":[{"type":"message"}]}'
@@ -735,11 +784,11 @@ class MatrixOrchestrationTests(unittest.TestCase):
                 return MODULE.HttpResponse(200, {}, b'{"data":[{"id":"gpt-5-6-pro"},{"id":"gpt-5-6-thinking"},{"id":"gpt-image-2"}]}')
             if path == "/v1/chat/completions":
                 if b'"stream":true' in kwargs.get("body", b""):
-                    return MODULE.HttpResponse(200, {}, b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n')
+                    return MODULE.HttpResponse(200, {"content-type": "text/event-stream"}, b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n')
                 return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"AURORA-CANARY-FILE-OK"}}]}')
             if path == "/v1/responses":
                 if b'"stream":true' in kwargs.get("body", b""):
-                    return MODULE.HttpResponse(200, {}, b'event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n')
+                    return MODULE.HttpResponse(200, {"content-type": "text/event-stream"}, b'event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n')
                 return MODULE.HttpResponse(200, {}, b'{"status":"completed","output":[{"type":"message"}]}')
             if path == "/v1/files":
                 return MODULE.HttpResponse(200, {}, b'{"id":"synthetic-file-id"}')
