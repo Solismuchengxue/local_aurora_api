@@ -519,7 +519,321 @@ python -m unittest tests.test_aurora_capability_canary.SafetyGateTests -v
 
 Expected: all safety tests PASS on Windows; importing the module must not require `fcntl`, Docker or network access.
 
-- [ ] **Step 5: Add report allowlist tests and minimal implement…3196 tokens truncated…lements variation through `/v1/images/edits` rather than `/v1/images/variations`, do not silently alias it in local code. Keep the official compatibility endpoint `/v1/images/variations` in this first probe; a later canary failure will produce `route_missing` and trigger a documented design decision.
+- [ ] **Step 5: Add report allowlist tests and minimal implementation**
+
+Add tests that build two target result maps and assert the serialized report contains only:
+
+```python
+class ReportTests(unittest.TestCase):
+    def test_report_is_bounded_and_contains_no_secret_or_body(self):
+        results = {
+            "direct": [MODULE.CheckResult("models", "PASS", "models_valid", {"count": 3})],
+            "gateway": [MODULE.CheckResult("models", "FAIL", "auth_failed", {})],
+        }
+        report = MODULE.build_report(
+            results,
+            datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        )
+        payload = MODULE.serialize_report(report)
+        self.assertLessEqual(len(payload), MODULE.MAX_REPORT_BYTES)
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(set(report), {"schema_version", "checked_at", "overall", "targets"})
+        self.assertNotIn("secret", payload.decode("utf-8"))
+        self.assertNotIn("body", payload.decode("utf-8"))
+```
+
+Implement `build_report()` using `asdict()` and fixed UTC `Z` timestamps. Implement `serialize_report()` with compact sorted JSON plus newline and the `32 KiB` limit. Reject detail keys outside the per-code allowlist rather than recursively sanitizing arbitrary data.
+
+- [ ] **Step 6: Commit only if authorized**
+
+```powershell
+git add -- scripts/aurora_capability_canary.py tests/test_aurora_capability_canary.py
+git diff --cached --check
+git commit -m "实现 Aurora canary 安全探测框架"
+```
+
+---
+
+### Task 3: Bounded HTTP, Chat and Responses Checks
+
+**Files:**
+- Modify: `scripts/aurora_capability_canary.py`
+- Modify: `tests/test_aurora_capability_canary.py`
+
+**Interfaces:**
+- Consumes: `TargetConfig`, `HttpResponse`, `Transport` from Task 2.
+- Produces: `http_request()`, `request_json()`, `parse_sse()`, `check_models()`, `check_chat_nonstream()`, `check_chat_stream()`, `check_responses_nonstream()`, `check_responses_stream()`.
+
+- [ ] **Step 1: Write failing transport classification tests**
+
+Use a fake transport returning `HttpResponse`; cover status classes without using body text:
+
+```python
+class HttpTests(unittest.TestCase):
+    def test_non_2xx_is_classified_without_response_body(self):
+        cases = {
+            401: "auth_failed",
+            403: "upstream_forbidden",
+            404: "route_missing",
+            429: "rate_limited",
+            502: "upstream_failed",
+        }
+        for status, code in cases.items():
+            with self.subTest(status=status):
+                response = MODULE.HttpResponse(status, {}, b"raw-private-upstream-body")
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.require_success(response)
+                self.assertEqual(raised.exception.code, code)
+                self.assertNotIn("private", str(raised.exception))
+
+    def test_json_and_sse_are_bounded_and_strict(self):
+        payload = MODULE.decode_json(MODULE.HttpResponse(200, {}, b'{"data":[]}'))
+        self.assertEqual(payload, {"data": []})
+        events = MODULE.parse_sse(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+            b"data: [DONE]\n\n"
+        )
+        self.assertEqual([event[0] for event in events], ["response.created", "response.completed", "done"])
+```
+
+- [ ] **Step 2: Implement the bounded transport**
+
+Implement `http_request()` with this exact signature and bounded behavior:
+
+```python
+ALLOWED_PATHS = {
+    "/v1/models",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/files",
+    "/v1/images/generations",
+    "/v1/images/edits",
+    "/v1/images/variations",
+    "/v1/audio/speech",
+    "/v1/audio/transcriptions",
+    "/v1/audio/translations",
+}
+
+
+def http_request(
+    target: TargetConfig,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    content_type: str | None = None,
+    timeout: int = 30,
+) -> HttpResponse:
+    validate_canary_url(target.base_url, target.name)
+    if method not in {"GET", "POST"} or path not in ALLOWED_PATHS:
+        raise ProbeError("unsafe_request")
+    headers = {"Authorization": f"Bearer {target.authorization}"}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(
+        target.base_url + path,
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(payload) > MAX_RESPONSE_BYTES:
+                raise ProbeError("response_too_large")
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            return HttpResponse(response.status, response_headers, payload)
+    except urllib.error.HTTPError as exc:
+        return HttpResponse(exc.code, {}, b"")
+    except TimeoutError as exc:
+        raise ProbeError("timeout") from exc
+    except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+        raise ProbeError("connectivity_failed") from exc
+```
+
+Additional requirements:
+
+- accepts only validated target base URLs plus a constant endpoint path;
+- sets the `Authorization: Bearer <canary-service-key>` header in memory;
+- reads at most `MAX_RESPONSE_BYTES + 1` and raises `response_too_large` if exceeded;
+- maps `HTTPError.code` without reading or reporting its response body;
+- maps timeout/`URLError`/`HTTPException` to fixed `timeout` or `connectivity_failed` codes;
+- normalizes response headers to lowercase names;
+- never returns the request authorization in any object.
+
+Implement:
+
+```python
+def require_success(response: HttpResponse) -> HttpResponse:
+    mapping = {
+        401: "auth_failed",
+        403: "upstream_forbidden",
+        404: "route_missing",
+        429: "rate_limited",
+    }
+    if 200 <= response.status < 300:
+        return response
+    if response.status >= 500:
+        raise ProbeError("upstream_failed")
+    raise ProbeError(mapping.get(response.status, "http_failed"))
+```
+
+`decode_json()` must reject bodies above `MAX_JSON_BYTES`, invalid UTF-8, non-JSON and non-object roots. `parse_sse()` must accept only bounded UTF-8 text, collect `event` plus JSON `data`, recognize `[DONE]`, and never return free-text delta values to the report layer.
+
+- [ ] **Step 3: Write failing model/chat/Responses structure tests**
+
+Use synthetic responses and assert only booleans/counts leave each check. Required cases:
+
+- models list includes `gpt-5-6-pro`, `gpt-5-6-thinking`, `gpt-image-2`;
+- chat non-stream has one choice, message object and string content (empty is structurally valid but returns `chat_empty` FAIL for canary capability acceptance);
+- chat stream includes at least one chunk and `[DONE]`;
+- Responses non-stream has `status=completed` and at least one output item;
+- Responses stream contains `response.created`, at least one output event, `response.completed`, then `[DONE]`;
+- malformed structures return fixed codes without copying payload data.
+
+Example:
+
+```python
+class TextCapabilityTests(unittest.TestCase):
+    def test_responses_stream_requires_completed_and_done(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+
+        def transport(*args, **kwargs):
+            return MODULE.HttpResponse(
+                200,
+                {"content-type": "text/event-stream"},
+                b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+                b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n"
+                b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+                b"data: [DONE]\n\n",
+            )
+
+        result = MODULE.check_responses_stream(target, transport)
+        self.assertEqual((result.status, result.code), ("PASS", "responses_stream_valid"))
+        self.assertEqual(result.details, {"created": True, "output_seen": True, "completed": True, "done": True})
+```
+
+- [ ] **Step 4: Implement the five text checks**
+
+Use fixed synthetic requests:
+
+```python
+CHAT_PROMPT = "Reply with exactly: AURORA-CANARY-OK"
+RESPONSES_INPUT = "Reply with exactly: AURORA-CANARY-OK"
+```
+
+Do not include these prompts or returned content in `CheckResult.details`. The only allowed details are model count, `content_present`, chunk count, and the four Responses stream booleans shown above.
+
+- [ ] **Step 5: Run focused tests**
+
+```powershell
+python -m unittest `
+  tests.test_aurora_capability_canary.HttpTests `
+  tests.test_aurora_capability_canary.TextCapabilityTests -v
+```
+
+Expected: PASS with no network activity.
+
+- [ ] **Step 6: Commit only if authorized**
+
+```powershell
+git add -- scripts/aurora_capability_canary.py tests/test_aurora_capability_canary.py
+git diff --cached --check
+git commit -m "增加 Aurora 文本与 Responses canary 检查"
+```
+
+---
+
+### Task 4: Multipart, Files and Image Checks
+
+**Files:**
+- Modify: `scripts/aurora_capability_canary.py`
+- Modify: `tests/test_aurora_capability_canary.py`
+
+**Interfaces:**
+- Consumes: bounded HTTP/JSON interfaces from Task 3.
+- Produces: `encode_multipart()`, `make_test_png()`, `decode_image_result()`, `check_files()`, `check_image_generation()`, `check_image_edit()`, `check_image_variation()`.
+
+- [ ] **Step 1: Write failing deterministic media helper tests**
+
+```python
+class MultipartAndImageHelperTests(unittest.TestCase):
+    def test_test_png_is_deterministic_and_valid(self):
+        first = MODULE.make_test_png()
+        second = MODULE.make_test_png()
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertLess(len(first), 16 * 1024)
+
+    def test_multipart_contains_names_but_not_local_paths(self):
+        content_type, body = MODULE.encode_multipart(
+            fields={"model": "gpt-image-2", "prompt": "synthetic edit"},
+            files={"image": ("source.png", "image/png", MODULE.make_test_png())},
+            boundary="aurora-canary-boundary",
+        )
+        self.assertEqual(content_type, "multipart/form-data; boundary=aurora-canary-boundary")
+        self.assertIn(b'filename="source.png"', body)
+        self.assertNotIn(str(Path.cwd()).encode(), body)
+```
+
+Implement `make_test_png()` with `struct` and `zlib`: one opaque 64×64 RGB image, no metadata or external file. Implement `encode_multipart()` with CRLF, deterministic field order, ASCII field names, explicit filename and a maximum request size of `8 MiB`.
+
+- [ ] **Step 2: Write failing image response tests**
+
+Cover:
+
+- valid `data[0].b64_json` decodes to PNG/JPEG/WebP signature;
+- malformed base64 fails `image_payload_invalid`;
+- URL-only result fails `image_url_not_accepted` so signed URLs never enter output or trigger an external fetch;
+- generation uses JSON with `response_format=b64_json`;
+- edit and variation use multipart with the in-memory PNG;
+- result details contain only `bytes`, `media_type`, `decodable`.
+
+```python
+def image_json(image: bytes) -> bytes:
+    return json.dumps(
+        {"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}
+    ).encode("utf-8")
+
+
+class ImageCapabilityTests(unittest.TestCase):
+    def test_generation_accepts_decodable_b64_only(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        result = MODULE.check_image_generation(
+            target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png())),
+        )
+        self.assertEqual((result.status, result.code), ("PASS", "image_generation_valid"))
+        self.assertEqual(result.details["media_type"], "image/png")
+        self.assertNotIn("b64_json", result.details)
+```
+
+- [ ] **Step 3: Write failing Files chain tests**
+
+The test transport must observe two requests without storing bodies in the result:
+
+1. multipart upload of filename `aurora-canary.txt`, content `AURORA CANARY SYNTHETIC FILE` and purpose `assistants`;
+2. chat request referencing the returned `file_id` and asking for the fixed marker.
+
+Assert the final details are exactly:
+
+```python
+{"upload_accepted": True, "file_id_present": True, "answer_present": True}
+```
+
+Do not report the actual file id or answer.
+
+- [ ] **Step 4: Implement Files and the three image checks**
+
+Endpoint and model contract:
+
+- `POST /v1/files`, then `POST /v1/chat/completions` with an `input_file` item;
+- `POST /v1/images/generations`, model `gpt-image-2`, `response_format=b64_json`, one 1024×1024 image;
+- `POST /v1/images/edits`, model `gpt-image-2`, fixed edit prompt, in-memory PNG;
+- `POST /v1/images/variations`, model `gpt-image-2`, in-memory PNG and no edit prompt.
+
+If the candidate Aurora implements variation through `/v1/images/edits` rather than `/v1/images/variations`, do not silently alias it in local code. Keep the official compatibility endpoint `/v1/images/variations` in this first probe; a later canary failure will produce `route_missing` and trigger a documented design decision.
 
 - [ ] **Step 5: Run focused tests**
 
