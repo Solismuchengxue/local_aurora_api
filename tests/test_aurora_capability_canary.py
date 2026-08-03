@@ -595,26 +595,50 @@ class FileCapabilityTests(unittest.TestCase):
         self.assertEqual((result.status, result.code, result.details), ("FAIL", "files_invalid", {}))
 
 
-def make_wav() -> bytes:
+def make_wav(*, channels=1, sample_width=2, frame_rate=16000) -> bytes:
     stream = io.BytesIO()
     with wave.open(stream, "wb") as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(16000)
-        output.writeframes(b"\x00\x00" * 1600)
+        output.setnchannels(channels)
+        output.setsampwidth(sample_width)
+        output.setframerate(frame_rate)
+        output.writeframes(b"\x00" * (channels * sample_width * 1600))
     return stream.getvalue()
 
 
 class AudioHelperTests(unittest.TestCase):
-    def test_wav_must_be_decodable_and_bounded(self):
+    def test_wav_requires_all_declared_frames_and_exact_container_boundary(self):
         audio = make_wav()
         details = MODULE.validate_audio(audio, "audio/wav")
         self.assertEqual(details, {"bytes": len(audio), "media_type": "audio/wav", "decodable": True})
-        with self.assertRaises(MODULE.ProbeError) as raised:
-            MODULE.validate_audio(b"not-audio", "audio/wav")
-        self.assertEqual(raised.exception.code, "audio_payload_invalid")
+        invalid = (
+            b"",
+            b"not-audio",
+            audio[:44],
+            audio[:-2],
+            audio + b"\x00",
+        )
+        for payload in invalid:
+            with self.subTest(bytes=len(payload)):
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.validate_audio(payload, "audio/wav")
+                self.assertEqual(raised.exception.code, "audio_payload_invalid")
 
-    def test_non_wav_formats_require_matching_bounded_signatures(self):
+    def test_wav_requires_fixed_pcm_mono_16bit_16khz_format(self):
+        wrong_format = bytearray(make_wav())
+        wrong_format[20:22] = struct.pack("<H", 3)
+        cases = (
+            bytes(wrong_format),
+            make_wav(channels=2),
+            make_wav(sample_width=1),
+            make_wav(frame_rate=8000),
+        )
+        for audio in cases:
+            with self.subTest(bytes=len(audio)):
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.validate_audio(audio, "audio/wav")
+                self.assertEqual(raised.exception.code, "audio_payload_invalid")
+
+    def test_non_wav_formats_fail_closed_without_a_standard_library_decoder(self):
         cases = (
             (b"\xff\xfb\x90\x00", "audio/mpeg"),
             (b"OggS\x00\x02", "audio/ogg"),
@@ -625,10 +649,9 @@ class AudioHelperTests(unittest.TestCase):
         )
         for audio, media_type in cases:
             with self.subTest(media_type=media_type):
-                self.assertEqual(MODULE.validate_audio(audio, media_type), {"bytes": len(audio), "media_type": media_type, "decodable": True})
-        with self.assertRaises(MODULE.ProbeError) as raised:
-            MODULE.validate_audio(b"OggS\x00\x02", "audio/mpeg")
-        self.assertEqual(raised.exception.code, "audio_payload_invalid")
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.validate_audio(audio, media_type)
+                self.assertEqual(raised.exception.code, "audio_payload_invalid")
 
 
 class AudioCapabilityTests(unittest.TestCase):

@@ -526,34 +526,55 @@ def check_image_variation(target: TargetConfig, transport: Transport = http_requ
     return _check_image("image_variation", "/v1/images/variations", target, body=body, content_type=content_type, transport=transport)
 
 
+def _wav_data_size(audio: bytes) -> int:
+    if len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        raise ProbeError("audio_payload_invalid")
+    if struct.unpack("<I", audio[4:8])[0] != len(audio) - 8:
+        raise ProbeError("audio_payload_invalid")
+    offset = 12
+    seen_fmt = False
+    data_size: int | None = None
+    while offset < len(audio):
+        if len(audio) - offset < 8:
+            raise ProbeError("audio_payload_invalid")
+        kind = audio[offset:offset + 4]
+        size = struct.unpack("<I", audio[offset + 4:offset + 8])[0]
+        data_end = offset + 8 + size
+        chunk_end = data_end + (size & 1)
+        if chunk_end > len(audio):
+            raise ProbeError("audio_payload_invalid")
+        if kind == b"fmt ":
+            if seen_fmt:
+                raise ProbeError("audio_payload_invalid")
+            seen_fmt = True
+        elif kind == b"data":
+            if data_size is not None:
+                raise ProbeError("audio_payload_invalid")
+            data_size = size
+        offset = chunk_end
+    if not seen_fmt or data_size is None or offset != len(audio):
+        raise ProbeError("audio_payload_invalid")
+    return data_size
+
+
 def validate_audio(audio: bytes, media_type: str) -> dict[str, object]:
-    if not isinstance(audio, bytes) or not audio or len(audio) > MAX_RESPONSE_BYTES or media_type not in MEDIA_TYPES:
+    if not isinstance(audio, bytes) or not audio or len(audio) > MAX_RESPONSE_BYTES or media_type != "audio/wav":
         raise ProbeError("audio_payload_invalid")
     try:
-        if media_type == "audio/wav":
-            with wave.open(io.BytesIO(audio), "rb") as source:
-                if source.getnchannels() < 1 or source.getsampwidth() < 1 or source.getframerate() < 1 or source.getnframes() < 1:
-                    raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/mpeg":
-            if not (audio.startswith(b"ID3") or (len(audio) >= 2 and audio[0] == 0xff and audio[1] & 0xe0 == 0xe0)):
+        data_size = _wav_data_size(audio)
+        with wave.open(io.BytesIO(audio), "rb") as source:
+            if (
+                source.getcomptype() != "NONE"
+                or source.getnchannels() != 1
+                or source.getsampwidth() != 2
+                or source.getframerate() != 16000
+                or source.getnframes() < 1
+            ):
                 raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/ogg":
-            if not audio.startswith(b"OggS"):
+            expected_size = source.getnframes() * source.getnchannels() * source.getsampwidth()
+            frames = source.readframes(source.getnframes() + 1)
+            if expected_size != data_size or len(frames) != expected_size or source.readframes(1):
                 raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/opus":
-            if not audio.startswith(b"OggS") or b"OpusHead" not in audio[:4096]:
-                raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/flac":
-            if not audio.startswith(b"fLaC"):
-                raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/aac":
-            if len(audio) < 2 or audio[0] != 0xff or audio[1] & 0xf6 != 0xf0:
-                raise ProbeError("audio_payload_invalid")
-        elif media_type == "audio/webm":
-            if not audio.startswith(b"\x1aE\xdf\xa3") or b"webm" not in audio[:4096].lower():
-                raise ProbeError("audio_payload_invalid")
-        else:
-            raise ProbeError("audio_payload_invalid")
     except (EOFError, wave.Error) as exc:
         raise ProbeError("audio_payload_invalid") from exc
     return {"bytes": len(audio), "media_type": media_type, "decodable": True}
