@@ -301,7 +301,14 @@ def check_chat_stream(target: TargetConfig, transport: Transport = http_request)
     try:
         response = require_success(transport(target, "POST", "/v1/chat/completions", body=_json_body({"model": "gpt-5-6-pro", "messages": [{"role": "user", "content": CHAT_PROMPT}], "stream": True}), content_type="application/json"))
         events = parse_sse(response.body)
-        chunks = sum(1 for event, _ in events if event != "done")
+        chunks = sum(
+            1
+            for event, payload in events
+            if event != "done"
+            and isinstance(payload.get("choices"), list)
+            and payload["choices"]
+            and any(isinstance(choice, dict) and isinstance(choice.get("delta"), dict) for choice in payload["choices"])
+        )
         done = bool(events) and events[-1][0] == "done"
         if not chunks or not done:
             raise ProbeError("chat_stream_invalid")
@@ -324,11 +331,19 @@ def check_responses_nonstream(target: TargetConfig, transport: Transport = http_
 def check_responses_stream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
     try:
         response = require_success(transport(target, "POST", "/v1/responses", body=_json_body({"model": "gpt-5-6-pro", "input": RESPONSES_INPUT, "stream": True}), content_type="application/json"))
-        names = [name for name, _ in parse_sse(response.body)]
+        events = parse_sse(response.body)
+        names = []
+        for name, payload in events:
+            if name == "done":
+                names.append(name)
+            elif name in {"response.created", "response.completed"} or name.startswith("response.output"):
+                if not isinstance(payload.get("type"), str) or payload["type"] != name:
+                    raise ProbeError("responses_stream_invalid")
+                names.append(name)
         created = "response.created" in names
         output_seen = any(name.startswith("response.output") for name in names)
         completed = "response.completed" in names
-        done = bool(names) and names[-1] == "done"
+        done = bool(events) and events[-1][0] == "done"
         if not (created and output_seen and completed and done and names.index("response.created") < next(index for index, name in enumerate(names) if name.startswith("response.output")) < names.index("response.completed")):
             raise ProbeError("responses_stream_invalid")
         return CheckResult("responses_stream", "PASS", "responses_stream_valid", {"created": True, "output_seen": True, "completed": True, "done": True})

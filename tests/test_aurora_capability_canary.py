@@ -163,6 +163,60 @@ class SanitizedReportTests(unittest.TestCase):
 
 
 class HttpTests(unittest.TestCase):
+    class RecordingResponse:
+        def __init__(self, payload):
+            self.status = 200
+            self.headers = {"X-Trace": "synthetic"}
+            self.payload = payload
+            self.read_sizes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            self.read_sizes.append(size)
+            return self.payload
+
+    def test_http_request_is_bounded_sanitized_and_uses_fixed_request_shape(self):
+        response = self.RecordingResponse(b'{"data":[]}')
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=response) as urlopen:
+            result = MODULE.http_request(target, "GET", "/v1/models")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:18080/v1/models")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+        self.assertEqual(response.read_sizes, [MODULE.MAX_RESPONSE_BYTES + 1])
+        self.assertEqual(result, MODULE.HttpResponse(200, {"x-trace": "synthetic"}, b'{"data":[]}'))
+        self.assertNotIn("authorization", result.headers)
+        self.assertNotIn("secret", repr(result))
+
+    def test_http_request_rejects_unsafe_method_and_path_before_urlopen(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        with mock.patch.object(MODULE.urllib.request, "urlopen") as urlopen:
+            for method, path in (("DELETE", "/v1/models"), ("GET", "/v1/not-allowed")):
+                with self.subTest(method=method, path=path), self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.http_request(target, method, path)
+                self.assertEqual(raised.exception.code, "unsafe_request")
+        urlopen.assert_not_called()
+
+    def test_http_request_rejects_oversized_response_and_does_not_read_http_error_body(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        oversized = self.RecordingResponse(b"x" * (MODULE.MAX_RESPONSE_BYTES + 1))
+        with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=oversized):
+            with self.assertRaises(MODULE.ProbeError) as raised:
+                MODULE.http_request(target, "GET", "/v1/models")
+        self.assertEqual(raised.exception.code, "response_too_large")
+        error = MODULE.urllib.error.HTTPError("http://example.invalid", 401, "unauthorized", {}, None)
+        error.read = mock.Mock(side_effect=AssertionError("body must stay unread"))
+        with mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
+            result = MODULE.http_request(target, "GET", "/v1/models")
+        self.assertEqual(result, MODULE.HttpResponse(401, {}, b""))
+        error.read.assert_not_called()
+
     def test_non_2xx_is_classified_without_response_body(self):
         cases = {
             401: "auth_failed",
@@ -190,7 +244,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual([event[0] for event in events], ["response.created", "response.completed", "done"])
 
     def test_malformed_json_and_sse_have_fixed_errors(self):
-        for body, code in ((b"not-json", "json_invalid"), (b"[]", "json_invalid")):
+        for body, code in (
+            (b"not-json", "json_invalid"),
+            (b"[]", "json_invalid"),
+            (b"\xff", "json_invalid"),
+            (b"x" * (MODULE.MAX_JSON_BYTES + 1), "json_too_large"),
+        ):
             with self.subTest(body=body), self.assertRaises(MODULE.ProbeError) as raised:
                 MODULE.decode_json(MODULE.HttpResponse(200, {}, body))
             self.assertEqual(raised.exception.code, code)
@@ -218,6 +277,11 @@ class TextCapabilityTests(unittest.TestCase):
         result = MODULE.check_models(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code, result.details), ("PASS", "models_valid", {"count": 3}))
 
+    def test_models_missing_required_id_has_fixed_code(self):
+        response = MODULE.HttpResponse(200, {}, b'{"data":[{"id":"gpt-5-6-pro"}]}')
+        result = MODULE.check_models(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "models_invalid", {}))
+
     def test_chat_nonstream_distinguishes_empty_content(self):
         response = MODULE.HttpResponse(
             200, {}, b'{"choices":[{"message":{"content":""}}]}'
@@ -235,6 +299,11 @@ class TextCapabilityTests(unittest.TestCase):
         result = MODULE.check_chat_stream(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code, result.details), ("PASS", "chat_stream_valid", {"chunks": 1, "done": True}))
 
+    def test_chat_stream_rejects_unrelated_json_before_done(self):
+        response = MODULE.HttpResponse(200, {}, b'data: {"unrelated":true}\n\ndata: [DONE]\n\n')
+        result = MODULE.check_chat_stream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "chat_stream_invalid", {}))
+
     def test_responses_nonstream_requires_completed_output(self):
         response = MODULE.HttpResponse(
             200, {}, b'{"status":"completed","output":[{"type":"message"}]}'
@@ -244,6 +313,11 @@ class TextCapabilityTests(unittest.TestCase):
             (result.status, result.code, result.details),
             ("PASS", "responses_nonstream_valid", {"completed": True, "output_count": 1}),
         )
+
+    def test_responses_nonstream_rejects_missing_output(self):
+        response = MODULE.HttpResponse(200, {}, b'{"status":"completed","output":[]}')
+        result = MODULE.check_responses_nonstream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "responses_nonstream_invalid", {}))
 
     def test_responses_stream_requires_completed_and_done(self):
         response = MODULE.HttpResponse(
@@ -257,6 +331,18 @@ class TextCapabilityTests(unittest.TestCase):
         result = MODULE.check_responses_stream(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code), ("PASS", "responses_stream_valid"))
         self.assertEqual(result.details, {"created": True, "output_seen": True, "completed": True, "done": True})
+
+    def test_responses_stream_rejects_event_type_mismatch(self):
+        response = MODULE.HttpResponse(
+            200,
+            {},
+            b'event: response.created\ndata: {"type":"unrelated"}\n\n'
+            b'event: response.output_text.delta\ndata: {"type":"unrelated"}\n\n'
+            b'event: response.completed\ndata: {"type":"unrelated"}\n\n'
+            b'data: [DONE]\n\n',
+        )
+        result = MODULE.check_responses_stream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "responses_stream_invalid", {}))
 
     def test_malformed_chat_structure_returns_fixed_code_without_payload(self):
         response = MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":42}}]}')
