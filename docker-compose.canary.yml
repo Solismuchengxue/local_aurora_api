@@ -1,0 +1,47 @@
+name: aurora-capability-canary
+
+services:
+  aurora-canary:
+    image: ${AURORA_CANARY_IMAGE:?set an approved immutable Aurora digest}
+    container_name: aurora-capability-canary
+    profiles: ["canary"]
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      Authorization: ${AURORA_CANARY_AUTHORIZATION:?set the canary service key}
+      ENABLE_EXTERNAL_TOKEN: "false"
+      PROXY_URL: http://mihomo:7890
+      http_proxy: http://mihomo:7890
+    volumes:
+      - type: bind
+        source: ./.secrets/canary/session_tokens.txt
+        target: /session_tokens.txt
+        read_only: true
+    networks:
+      - canary
+      - aurora-stack
+    restart: unless-stopped
+
+  new-api-canary:
+    image: calciumion/new-api@sha256:428018a37c0b26c163a3367c18401161707cd0e08d0f26a3dde9ff0caa05e34c
+    container_name: new-api-capability-canary
+    profiles: ["canary"]
+    ports:
+      - "127.0.0.1:13000:3000"
+    volumes:
+      - ./data/canary/new-api:/data
+    environment:
+      TZ: Asia/Shanghai
+      SESSION_SECRET: ${NEW_API_CANARY_SESSION_SECRET:?set the canary session secret}
+    depends_on:
+      - aurora-canary
+    networks:
+      - canary
+    restart: unless-stopped
+
+networks:
+  canary:
+    name: aurora-capability-canary
+  aurora-stack:
+    name: aurora-stack_default
+    external: true
