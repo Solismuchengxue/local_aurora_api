@@ -36,11 +36,16 @@
 
 以下仅是未来取得相应授权后的命令示例。执行 `pull`、`up`、真实探针、重启和清理均不在本地计划授权范围内。
 
-先用已批准的非敏感配置静态解析：
+先在 WSL 的 Bash 中只用**本次命令注入**的非敏感占位值静态解析；不使用 `--env-file`，不得读取真实 `.env.canary`。将 JSON 输出重定向到 null，禁止把解析后的环境变量或任何 secret 输出到终端、日志或报告：
 
 ```bash
-docker compose --env-file .env.canary -f docker-compose.canary.yml --profile canary config
+AURORA_CANARY_IMAGE='ghcr.io/aurora-develop/aurora@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+AURORA_CANARY_AUTHORIZATION='non-sensitive-canary-service-key' \
+NEW_API_CANARY_SESSION_SECRET='non-sensitive-canary-session-secret' \
+docker compose -f docker-compose.canary.yml --profile canary config --format json >/dev/null
 ```
+
+Windows 主机应通过 WSL 运行同一条命令；该检查只验证 Compose 语法，不拉取、创建或启动任何容器。
 
 在 isolated canary 已创建且获得每次真实调用的独立批准后，必须先执行 direct；仅在全部 PASS 后再执行 both：
 
