@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import wave
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aurora_capability_canary.py"
@@ -507,3 +508,88 @@ class FileCapabilityTests(unittest.TestCase):
         self.assertEqual(calls[1][0][2], "/v1/chat/completions")
         self.assertIn("file-synthetic-private-id", calls[1][1]["body"].decode("utf-8"))
         self.assertNotIn("file-synthetic-private-id", repr(result))
+
+
+def make_wav() -> bytes:
+    stream = io.BytesIO()
+    with wave.open(stream, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b"\x00\x00" * 1600)
+    return stream.getvalue()
+
+
+class AudioHelperTests(unittest.TestCase):
+    def test_wav_must_be_decodable_and_bounded(self):
+        audio = make_wav()
+        details = MODULE.validate_audio(audio, "audio/wav")
+        self.assertEqual(details, {"bytes": len(audio), "media_type": "audio/wav", "decodable": True})
+        with self.assertRaises(MODULE.ProbeError) as raised:
+            MODULE.validate_audio(b"not-audio", "audio/wav")
+        self.assertEqual(raised.exception.code, "audio_payload_invalid")
+
+    def test_non_wav_formats_require_matching_bounded_signatures(self):
+        cases = (
+            (b"\xff\xfb\x90\x00", "audio/mpeg"),
+            (b"OggS\x00\x02", "audio/ogg"),
+            (b"OggS\x00\x02OpusHead", "audio/opus"),
+            (b"fLaC\x00\x00\x00\x22", "audio/flac"),
+            (b"\xff\xf1\x50\x80", "audio/aac"),
+            (b"\x1aE\xdf\xa3\x93B\x82\x88webm", "audio/webm"),
+        )
+        for audio, media_type in cases:
+            with self.subTest(media_type=media_type):
+                self.assertEqual(MODULE.validate_audio(audio, media_type), {"bytes": len(audio), "media_type": media_type, "decodable": True})
+        with self.assertRaises(MODULE.ProbeError) as raised:
+            MODULE.validate_audio(b"OggS\x00\x02", "audio/mpeg")
+        self.assertEqual(raised.exception.code, "audio_payload_invalid")
+
+
+class AudioCapabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+
+    def test_audio_chain_uses_in_memory_wav_and_sanitized_results(self):
+        audio = make_wav()
+        calls = []
+
+        def transport(*args, **kwargs):
+            calls.append((args, kwargs))
+            path = args[2]
+            if path == "/v1/audio/speech":
+                return MODULE.HttpResponse(200, {"content-type": "audio/wav"}, audio)
+            if path == "/v1/audio/transcriptions":
+                return MODULE.HttpResponse(200, {}, '{"text":"这是一次能力测试。"}'.encode("utf-8"))
+            if path == "/v1/audio/translations":
+                return MODULE.HttpResponse(200, {}, b'{"text":"This is a capability test."}')
+            self.fail(f"unexpected path: {path}")
+
+        speech, returned_audio = MODULE.check_audio_speech(self.target, transport)
+        transcription = MODULE.check_audio_transcription(self.target, returned_audio, transport)
+        translation = MODULE.check_audio_translation(self.target, returned_audio, transport)
+        self.assertEqual((speech.status, speech.code, speech.details), ("PASS", "audio_speech_valid", {"bytes": len(audio), "media_type": "audio/wav", "decodable": True}))
+        self.assertEqual((transcription.status, transcription.code, transcription.details), ("PASS", "audio_transcription_valid", {"text_present": True, "expected_marker_present": True}))
+        self.assertEqual((translation.status, translation.code, translation.details), ("PASS", "audio_translation_valid", {"text_present": True, "english_markers_present": True}))
+        self.assertEqual([call[0][2] for call in calls], ["/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations"])
+        self.assertEqual(json.loads(calls[0][1]["body"]), {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "wav"})
+        self.assertIn(b'filename="aurora-canary.wav"', calls[1][1]["body"])
+        self.assertIn(b'name="language"', calls[1][1]["body"])
+        self.assertIn(b'filename="aurora-canary.wav"', calls[2][1]["body"])
+        self.assertNotIn("能力测试", repr(transcription))
+        self.assertNotIn("capability test", repr(translation))
+
+    def test_audio_text_mismatches_return_fixed_codes_without_text(self):
+        audio = make_wav()
+        transcription = MODULE.check_audio_transcription(
+            self.target,
+            audio,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"text":"not the marker"}'),
+        )
+        translation = MODULE.check_audio_translation(
+            self.target,
+            audio,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"text":"not the marker"}'),
+        )
+        self.assertEqual((transcription.status, transcription.code, transcription.details), ("FAIL", "transcription_mismatch", {}))
+        self.assertEqual((translation.status, translation.code, translation.details), ("FAIL", "translation_mismatch", {}))

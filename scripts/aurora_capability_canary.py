@@ -9,6 +9,7 @@ import binascii
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import http.client
+import io
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,7 @@ import struct
 import urllib.parse
 import urllib.error
 import urllib.request
+import wave
 import zlib
 from typing import Callable, Mapping
 
@@ -406,6 +408,84 @@ def check_image_edit(target: TargetConfig, transport: Transport = http_request) 
 def check_image_variation(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
     content_type, body = _image_multipart(include_prompt=False)
     return _check_image("image_variation", "/v1/images/variations", target, body=body, content_type=content_type, transport=transport)
+
+
+def validate_audio(audio: bytes, media_type: str) -> dict[str, object]:
+    if not isinstance(audio, bytes) or not audio or len(audio) > MAX_RESPONSE_BYTES or media_type not in MEDIA_TYPES:
+        raise ProbeError("audio_payload_invalid")
+    try:
+        if media_type == "audio/wav":
+            with wave.open(io.BytesIO(audio), "rb") as source:
+                if source.getnchannels() < 1 or source.getsampwidth() < 1 or source.getframerate() < 1 or source.getnframes() < 1:
+                    raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/mpeg":
+            if not (audio.startswith(b"ID3") or (len(audio) >= 2 and audio[0] == 0xff and audio[1] & 0xe0 == 0xe0)):
+                raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/ogg":
+            if not audio.startswith(b"OggS"):
+                raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/opus":
+            if not audio.startswith(b"OggS") or b"OpusHead" not in audio[:4096]:
+                raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/flac":
+            if not audio.startswith(b"fLaC"):
+                raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/aac":
+            if len(audio) < 2 or audio[0] != 0xff or audio[1] & 0xf6 != 0xf0:
+                raise ProbeError("audio_payload_invalid")
+        elif media_type == "audio/webm":
+            if not audio.startswith(b"\x1aE\xdf\xa3") or b"webm" not in audio[:4096].lower():
+                raise ProbeError("audio_payload_invalid")
+        else:
+            raise ProbeError("audio_payload_invalid")
+    except (EOFError, wave.Error) as exc:
+        raise ProbeError("audio_payload_invalid") from exc
+    return {"bytes": len(audio), "media_type": media_type, "decodable": True}
+
+
+def extract_text_result(response: HttpResponse) -> str:
+    payload = decode_json(response)
+    if set(payload) != {"text"} or not isinstance(payload["text"], str):
+        raise ProbeError("audio_payload_invalid")
+    text = " ".join(payload["text"].split())
+    if not text:
+        raise ProbeError("audio_payload_invalid")
+    return text
+
+
+def check_audio_speech(target: TargetConfig, transport: Transport = http_request) -> tuple[CheckResult, bytes | None]:
+    body = json.dumps(
+        {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "wav"},
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        response = require_success(transport(target, "POST", "/v1/audio/speech", body=body, content_type="application/json", timeout=180))
+        details = validate_audio(response.body, response.headers.get("content-type", ""))
+        return CheckResult("audio_speech", "PASS", "audio_speech_valid", details), response.body
+    except ProbeError as exc:
+        code = exc.code if exc.code in TRANSPORT_ERROR_CODES else "audio_payload_invalid"
+        return CheckResult("audio_speech", "FAIL", code, {}), None
+
+
+def _check_audio_text(name: str, path: str, audio: bytes | None, *, fields: Mapping[str, str], expected: Callable[[str], bool], success_code: str, success_details: dict[str, object], failure_code: str, target: TargetConfig, transport: Transport) -> CheckResult:
+    if audio is None:
+        return CheckResult(name, "FAIL", "dependency_failed", {"dependency": "audio_speech"})
+    try:
+        content_type, body = encode_multipart(fields=fields, files={"file": ("aurora-canary.wav", "audio/wav", audio)})
+        text = extract_text_result(require_success(transport(target, "POST", path, body=body, content_type=content_type)))
+        if not expected(text):
+            raise ProbeError(failure_code)
+        return CheckResult(name, "PASS", success_code, success_details)
+    except ProbeError as exc:
+        return _failure(name, failure_code, exc)
+
+
+def check_audio_transcription(target: TargetConfig, audio: bytes | None, transport: Transport = http_request) -> CheckResult:
+    return _check_audio_text("audio_transcription", "/v1/audio/transcriptions", audio, fields={"model": "whisper-1", "language": "zh"}, expected=lambda text: "能力测试" in text, success_code="audio_transcription_valid", success_details={"text_present": True, "expected_marker_present": True}, failure_code="transcription_mismatch", target=target, transport=transport)
+
+
+def check_audio_translation(target: TargetConfig, audio: bytes | None, transport: Transport = http_request) -> CheckResult:
+    return _check_audio_text("audio_translation", "/v1/audio/translations", audio, fields={"model": "whisper-1"}, expected=lambda text: "capability" in text.lower() and "test" in text.lower(), success_code="audio_translation_valid", success_details={"text_present": True, "english_markers_present": True}, failure_code="translation_mismatch", target=target, transport=transport)
 
 
 def check_files(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
