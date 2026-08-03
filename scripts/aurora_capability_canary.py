@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import http.client
 import json
 from pathlib import Path
 import sys
 import urllib.parse
+import urllib.error
+import urllib.request
 from typing import Callable, Mapping
 
 
@@ -86,6 +89,21 @@ MEDIA_TYPES = {
     "audio/aac",
     "audio/webm",
 }
+ALLOWED_PATHS = {
+    "/v1/models",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/files",
+    "/v1/images/generations",
+    "/v1/images/edits",
+    "/v1/images/variations",
+    "/v1/audio/speech",
+    "/v1/audio/transcriptions",
+    "/v1/audio/translations",
+}
+CHAT_PROMPT = "Reply with exactly: AURORA-CANARY-OK"
+RESPONSES_INPUT = "Reply with exactly: AURORA-CANARY-OK"
+REQUIRED_MODEL_IDS = {"gpt-5-6-pro", "gpt-5-6-thinking", "gpt-image-2"}
 
 
 class ProbeError(RuntimeError):
@@ -133,6 +151,189 @@ def validate_canary_url(url: str, target: str) -> str:
     if url.rstrip("/") != expected or parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
         raise ProbeError("unsafe_target")
     return expected
+
+
+def http_request(
+    target: TargetConfig,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    content_type: str | None = None,
+    timeout: int = 30,
+) -> HttpResponse:
+    validate_canary_url(target.base_url, target.name)
+    if method not in {"GET", "POST"} or path not in ALLOWED_PATHS:
+        raise ProbeError("unsafe_request")
+    headers = {"Authorization": f"Bearer {target.authorization}"}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(target.base_url + path, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(payload) > MAX_RESPONSE_BYTES:
+                raise ProbeError("response_too_large")
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+            return HttpResponse(response.status, response_headers, payload)
+    except urllib.error.HTTPError as exc:
+        return HttpResponse(exc.code, {}, b"")
+    except TimeoutError as exc:
+        raise ProbeError("timeout") from exc
+    except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+        raise ProbeError("connectivity_failed") from exc
+
+
+def require_success(response: HttpResponse) -> HttpResponse:
+    mapping = {401: "auth_failed", 403: "upstream_forbidden", 404: "route_missing", 429: "rate_limited"}
+    if 200 <= response.status < 300:
+        return response
+    if response.status >= 500:
+        raise ProbeError("upstream_failed")
+    raise ProbeError(mapping.get(response.status, "http_failed"))
+
+
+def decode_json(response: HttpResponse) -> dict[str, object]:
+    if len(response.body) > MAX_JSON_BYTES:
+        raise ProbeError("json_too_large")
+    try:
+        value = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProbeError("json_invalid") from exc
+    if not isinstance(value, dict):
+        raise ProbeError("json_invalid")
+    return value
+
+
+def parse_sse(body: bytes) -> list[tuple[str, dict[str, object]]]:
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ProbeError("response_too_large")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProbeError("sse_invalid") from exc
+    events: list[tuple[str, dict[str, object]]] = []
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        if not block:
+            continue
+        event_name: str | None = None
+        data: str | None = None
+        for line in block.split("\n"):
+            if line.startswith("event: ") and event_name is None:
+                event_name = line[7:]
+            elif line.startswith("data: ") and data is None:
+                data = line[6:]
+            else:
+                raise ProbeError("sse_invalid")
+        if data is None:
+            raise ProbeError("sse_invalid")
+        if data == "[DONE]":
+            if event_name is not None:
+                raise ProbeError("sse_invalid")
+            events.append(("done", {}))
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ProbeError("sse_invalid") from exc
+        if not isinstance(payload, dict):
+            raise ProbeError("sse_invalid")
+        payload_type = payload.get("type")
+        if event_name is None:
+            event_name = payload_type if isinstance(payload_type, str) else "message"
+        if not event_name:
+            raise ProbeError("sse_invalid")
+        events.append((event_name, payload))
+    return events
+
+
+def request_json(
+    target: TargetConfig,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    transport: Transport = http_request,
+) -> dict[str, object]:
+    return decode_json(require_success(transport(target, method, path, body=body, content_type="application/json" if body else None)))
+
+
+def _failure(name: str, structure_code: str, error: ProbeError) -> CheckResult:
+    code = error.code if error.code in TRANSPORT_ERROR_CODES else structure_code
+    return CheckResult(name, "FAIL", code, {})
+
+
+def _json_body(value: dict[str, object]) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
+def check_models(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        payload = request_json(target, "GET", "/v1/models", transport=transport)
+        models = payload.get("data")
+        if not isinstance(models, list):
+            raise ProbeError("models_invalid")
+        model_ids = {item.get("id") for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)}
+        if not REQUIRED_MODEL_IDS <= model_ids:
+            raise ProbeError("models_invalid")
+        return CheckResult("models", "PASS", "models_valid", {"count": len(models)})
+    except ProbeError as exc:
+        return _failure("models", "models_invalid", exc)
+
+
+def check_chat_nonstream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        payload = request_json(target, "POST", "/v1/chat/completions", body=_json_body({"model": "gpt-5-6-pro", "messages": [{"role": "user", "content": CHAT_PROMPT}]}), transport=transport)
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ProbeError("chat_nonstream_invalid")
+        message = choices[0].get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise ProbeError("chat_nonstream_invalid")
+        if not message["content"]:
+            return CheckResult("chat_nonstream", "FAIL", "chat_empty", {})
+        return CheckResult("chat_nonstream", "PASS", "chat_nonstream_valid", {"content_present": True})
+    except ProbeError as exc:
+        return _failure("chat_nonstream", "chat_nonstream_invalid", exc)
+
+
+def check_chat_stream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        response = require_success(transport(target, "POST", "/v1/chat/completions", body=_json_body({"model": "gpt-5-6-pro", "messages": [{"role": "user", "content": CHAT_PROMPT}], "stream": True}), content_type="application/json"))
+        events = parse_sse(response.body)
+        chunks = sum(1 for event, _ in events if event != "done")
+        done = bool(events) and events[-1][0] == "done"
+        if not chunks or not done:
+            raise ProbeError("chat_stream_invalid")
+        return CheckResult("chat_stream", "PASS", "chat_stream_valid", {"chunks": chunks, "done": True})
+    except ProbeError as exc:
+        return _failure("chat_stream", "chat_stream_invalid", exc)
+
+
+def check_responses_nonstream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        payload = request_json(target, "POST", "/v1/responses", body=_json_body({"model": "gpt-5-6-pro", "input": RESPONSES_INPUT}), transport=transport)
+        output = payload.get("output")
+        if payload.get("status") != "completed" or not isinstance(output, list) or not output:
+            raise ProbeError("responses_nonstream_invalid")
+        return CheckResult("responses_nonstream", "PASS", "responses_nonstream_valid", {"completed": True, "output_count": len(output)})
+    except ProbeError as exc:
+        return _failure("responses_nonstream", "responses_nonstream_invalid", exc)
+
+
+def check_responses_stream(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        response = require_success(transport(target, "POST", "/v1/responses", body=_json_body({"model": "gpt-5-6-pro", "input": RESPONSES_INPUT, "stream": True}), content_type="application/json"))
+        names = [name for name, _ in parse_sse(response.body)]
+        created = "response.created" in names
+        output_seen = any(name.startswith("response.output") for name in names)
+        completed = "response.completed" in names
+        done = bool(names) and names[-1] == "done"
+        if not (created and output_seen and completed and done and names.index("response.created") < next(index for index, name in enumerate(names) if name.startswith("response.output")) < names.index("response.completed")):
+            raise ProbeError("responses_stream_invalid")
+        return CheckResult("responses_stream", "PASS", "responses_stream_valid", {"created": True, "output_seen": True, "completed": True, "done": True})
+    except ProbeError as exc:
+        return _failure("responses_stream", "responses_stream_invalid", exc)
 
 
 def read_env_value(path: Path, key: str) -> str:

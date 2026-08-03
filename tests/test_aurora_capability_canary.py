@@ -160,3 +160,105 @@ class SanitizedReportTests(unittest.TestCase):
                     ]
                 }
             )
+
+
+class HttpTests(unittest.TestCase):
+    def test_non_2xx_is_classified_without_response_body(self):
+        cases = {
+            401: "auth_failed",
+            403: "upstream_forbidden",
+            404: "route_missing",
+            429: "rate_limited",
+            502: "upstream_failed",
+        }
+        for status, code in cases.items():
+            with self.subTest(status=status):
+                response = MODULE.HttpResponse(status, {}, b"raw-private-upstream-body")
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.require_success(response)
+                self.assertEqual(raised.exception.code, code)
+                self.assertNotIn("private", str(raised.exception))
+
+    def test_json_and_sse_are_bounded_and_strict(self):
+        payload = MODULE.decode_json(MODULE.HttpResponse(200, {}, b'{"data":[]}'))
+        self.assertEqual(payload, {"data": []})
+        events = MODULE.parse_sse(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+            b"data: [DONE]\n\n"
+        )
+        self.assertEqual([event[0] for event in events], ["response.created", "response.completed", "done"])
+
+    def test_malformed_json_and_sse_have_fixed_errors(self):
+        for body, code in ((b"not-json", "json_invalid"), (b"[]", "json_invalid")):
+            with self.subTest(body=body), self.assertRaises(MODULE.ProbeError) as raised:
+                MODULE.decode_json(MODULE.HttpResponse(200, {}, body))
+            self.assertEqual(raised.exception.code, code)
+        with self.assertRaises(MODULE.ProbeError) as raised:
+            MODULE.parse_sse(b"event: response.created\ndata: not-json\n\n")
+        self.assertEqual(raised.exception.code, "sse_invalid")
+
+
+class TextCapabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+
+    @staticmethod
+    def transport_for(response):
+        def transport(*args, **kwargs):
+            return response
+        return transport
+
+    def test_models_requires_expected_model_ids(self):
+        response = MODULE.HttpResponse(
+            200,
+            {"content-type": "application/json"},
+            b'{"data":[{"id":"gpt-5-6-pro"},{"id":"gpt-5-6-thinking"},{"id":"gpt-image-2"}]}'
+        )
+        result = MODULE.check_models(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("PASS", "models_valid", {"count": 3}))
+
+    def test_chat_nonstream_distinguishes_empty_content(self):
+        response = MODULE.HttpResponse(
+            200, {}, b'{"choices":[{"message":{"content":""}}]}'
+        )
+        result = MODULE.check_chat_nonstream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "chat_empty", {}))
+
+    def test_chat_stream_requires_chunk_and_done(self):
+        response = MODULE.HttpResponse(
+            200,
+            {"content-type": "text/event-stream"},
+            b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\n'
+            b'data: [DONE]\n\n',
+        )
+        result = MODULE.check_chat_stream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("PASS", "chat_stream_valid", {"chunks": 1, "done": True}))
+
+    def test_responses_nonstream_requires_completed_output(self):
+        response = MODULE.HttpResponse(
+            200, {}, b'{"status":"completed","output":[{"type":"message"}]}'
+        )
+        result = MODULE.check_responses_nonstream(self.target, self.transport_for(response))
+        self.assertEqual(
+            (result.status, result.code, result.details),
+            ("PASS", "responses_nonstream_valid", {"completed": True, "output_count": 1}),
+        )
+
+    def test_responses_stream_requires_completed_and_done(self):
+        response = MODULE.HttpResponse(
+            200,
+            {"content-type": "text/event-stream"},
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n"
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+            b"data: [DONE]\n\n",
+        )
+        result = MODULE.check_responses_stream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code), ("PASS", "responses_stream_valid"))
+        self.assertEqual(result.details, {"created": True, "output_seen": True, "completed": True, "done": True})
+
+    def test_malformed_chat_structure_returns_fixed_code_without_payload(self):
+        response = MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":42}}]}')
+        result = MODULE.check_chat_nonstream(self.target, self.transport_for(response))
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "chat_nonstream_invalid", {}))
