@@ -343,6 +343,10 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 
 本规格是总架构，不应生成一个跨越本地开发、真实能力调用和生产切换的单一大计划。用户复核后按以下顺序分别形成计划，每个计划结束后重新验收并等待下一门禁：
 
+### 实施制品
+
+本地准备阶段的可审查制品为：[准备计划](../plans/2026-08-03-aurora-capability-canary-local-preparation.md)、[能力报告 Schema](../../contracts/aurora-capability-canary-report-v1.schema.json) 和 [候选运行手册](../../aurora_capability_canary.md)。健康 `latest.json` Schema v2 不属于本计划：canary 尚未建立稳定的第一方续期信号。这是有范围的延期，不是未填补的占位项。
+
 1. **本地准备计划**：候选版本/许可证/digest 核对，Compose 候选覆盖，健康 Schema 与测试，文档差异；不连接 FNOS。
 2. **FNOS 隔离 canary 计划**：只读基线、镜像拉取、独立容器/数据、真实能力矩阵、首次自然续期和重启恢复；不修改生产栈。
 3. **生产切换计划**：最终备份、旧 refresh cron 暂停、Aurora/New API 凭据流向切换、状态/n8n 兼容发布、验收与回退。
