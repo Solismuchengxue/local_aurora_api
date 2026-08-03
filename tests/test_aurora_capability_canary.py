@@ -13,6 +13,12 @@ import wave
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aurora_capability_canary.py"
+SCHEMA = (
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "contracts"
+    / "aurora-capability-canary-report-v1.schema.json"
+)
 SPEC = importlib.util.spec_from_file_location("aurora_capability_canary", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -593,3 +599,182 @@ class AudioCapabilityTests(unittest.TestCase):
         )
         self.assertEqual((transcription.status, transcription.code, transcription.details), ("FAIL", "transcription_mismatch", {}))
         self.assertEqual((translation.status, translation.code, translation.details), ("FAIL", "translation_mismatch", {}))
+
+
+def passing_results():
+    return [
+        MODULE.CheckResult("models", "PASS", "models_valid", {"count": 3}),
+        MODULE.CheckResult("chat_nonstream", "PASS", "chat_nonstream_valid", {"content_present": True}),
+        MODULE.CheckResult("chat_stream", "PASS", "chat_stream_valid", {"chunks": 1, "done": True}),
+        MODULE.CheckResult("responses_nonstream", "PASS", "responses_nonstream_valid", {"completed": True, "output_count": 1}),
+        MODULE.CheckResult("responses_stream", "PASS", "responses_stream_valid", {"created": True, "output_seen": True, "completed": True, "done": True}),
+        MODULE.CheckResult("files", "PASS", "files_valid", {"upload_accepted": True, "file_id_present": True, "answer_present": True}),
+        MODULE.CheckResult("image_generation", "PASS", "image_generation_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
+        MODULE.CheckResult("image_edit", "PASS", "image_edit_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
+        MODULE.CheckResult("image_variation", "PASS", "image_variation_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
+        MODULE.CheckResult("audio_speech", "PASS", "audio_speech_valid", {"bytes": 1, "media_type": "audio/wav", "decodable": True}),
+        MODULE.CheckResult("audio_transcription", "PASS", "audio_transcription_valid", {"text_present": True, "expected_marker_present": True}),
+        MODULE.CheckResult("audio_translation", "PASS", "audio_translation_valid", {"text_present": True, "english_markers_present": True}),
+    ]
+
+
+class MatrixOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        self.direct = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "direct-secret")
+        self.gateway = MODULE.TargetConfig("gateway", MODULE.GATEWAY_BASE_URL, "gateway-secret")
+
+    def test_run_target_runs_every_check_in_the_fixed_order(self):
+        audio = make_wav()
+        requests = []
+
+        def transport(target, method, path, **kwargs):
+            requests.append((target.name, path))
+            if path == "/v1/models":
+                return MODULE.HttpResponse(200, {}, b'{"data":[{"id":"gpt-5-6-pro"},{"id":"gpt-5-6-thinking"},{"id":"gpt-image-2"}]}')
+            if path == "/v1/chat/completions":
+                if b'"stream":true' in kwargs.get("body", b""):
+                    return MODULE.HttpResponse(200, {}, b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n')
+                return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"AURORA-CANARY-FILE-OK"}}]}')
+            if path == "/v1/responses":
+                if b'"stream":true' in kwargs.get("body", b""):
+                    return MODULE.HttpResponse(200, {}, b'event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\ndata: [DONE]\n\n')
+                return MODULE.HttpResponse(200, {}, b'{"status":"completed","output":[{"type":"message"}]}')
+            if path == "/v1/files":
+                return MODULE.HttpResponse(200, {}, b'{"id":"synthetic-file-id"}')
+            if path.startswith("/v1/images/"):
+                return MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png()))
+            if path == "/v1/audio/speech":
+                return MODULE.HttpResponse(200, {"content-type": "audio/wav"}, audio)
+            if path == "/v1/audio/transcriptions":
+                return MODULE.HttpResponse(200, {}, '{"text":"这是一次能力测试。"}'.encode("utf-8"))
+            if path == "/v1/audio/translations":
+                return MODULE.HttpResponse(200, {}, b'{"text":"This is a capability test."}')
+            self.fail(f"unexpected request: {path}")
+
+        results = MODULE.run_target(self.direct, transport)
+        self.assertEqual(tuple(result.name for result in results), MODULE.EXPECTED_CHECKS)
+        self.assertTrue(all(result.status == "PASS" for result in results))
+        self.assertEqual([path for _, path in requests], [
+            "/v1/models", "/v1/chat/completions", "/v1/chat/completions",
+            "/v1/responses", "/v1/responses", "/v1/files", "/v1/chat/completions",
+            "/v1/images/generations", "/v1/images/edits", "/v1/images/variations",
+            "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations",
+        ])
+
+    def test_run_matrix_blocks_gateway_requests_when_direct_fails(self):
+        requests = []
+
+        def transport(target, method, path, **kwargs):
+            requests.append(target.name)
+            return MODULE.HttpResponse(401, {}, b"")
+
+        results = MODULE.run_matrix(self.direct, self.gateway, target_mode="both", transport=transport)
+        self.assertTrue(requests)
+        self.assertEqual(set(requests), {"direct"})
+        self.assertEqual(
+            [(result.name, result.status, result.code, result.details) for result in results["gateway"]],
+            [(name, "FAIL", "dependency_failed", {"dependency": "direct"}) for name in MODULE.EXPECTED_CHECKS],
+        )
+
+    def test_run_matrix_runs_gateway_only_after_all_direct_checks_pass(self):
+        calls = []
+
+        def run_target(target, transport):
+            calls.append(target.name)
+            return passing_results()
+
+        with mock.patch.object(MODULE, "run_target", side_effect=run_target):
+            results = MODULE.run_matrix(self.direct, self.gateway, target_mode="both")
+        self.assertEqual(calls, ["direct", "gateway"])
+        self.assertEqual(set(results), {"direct", "gateway"})
+        self.assertTrue(all(result.status == "PASS" for target in results.values() for result in target))
+
+    def test_run_target_marks_audio_children_as_failed_dependencies(self):
+        with mock.patch.object(MODULE, "check_audio_speech", return_value=(MODULE.CheckResult("audio_speech", "FAIL", "connectivity_failed", {}), None)):
+            results = MODULE.run_target(self.direct, lambda *args, **kwargs: MODULE.HttpResponse(401, {}, b""))
+        self.assertEqual(
+            [(result.name, result.code, result.details) for result in results[-3:]],
+            [
+                ("audio_speech", "connectivity_failed", {}),
+                ("audio_transcription", "dependency_failed", {"dependency": "audio_speech"}),
+                ("audio_translation", "dependency_failed", {"dependency": "audio_speech"}),
+            ],
+        )
+
+    def test_cli_reads_gateway_key_only_after_direct_pass_and_redacts_stdout(self):
+        events = []
+
+        def read_env(path, key):
+            events.append("env")
+            return "direct-secret"
+
+        def read_secret(path):
+            events.append("gateway-key")
+            return "gateway-secret"
+
+        def run_target(target, transport=MODULE.http_request):
+            events.append(f"run-{target.name}")
+            return passing_results()
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(MODULE, "read_env_value", side_effect=read_env),
+            mock.patch.object(MODULE, "read_single_secret", side_effect=read_secret),
+            mock.patch.object(MODULE, "run_target", side_effect=run_target),
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            exit_code = MODULE.main([
+                "--allow-real-api", "--target", "both", "--json",
+                "--env-file", str(Path(directory) / "env"),
+                "--gateway-key-file", str(Path(directory) / "key"),
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(events, ["env", "run-direct", "gateway-key", "run-gateway"])
+        self.assertEqual(stderr.getvalue(), "")
+        output = stdout.getvalue()
+        self.assertIn('"overall":"PASS"', output)
+        for forbidden in ("direct-secret", "gateway-secret", MODULE.CHAT_PROMPT, "synthetic-file-id", "https://", "b64_json"):
+            self.assertNotIn(forbidden, output)
+
+    def test_cli_returns_one_for_a_completed_failed_direct_matrix(self):
+        failed = passing_results()
+        failed[0] = MODULE.CheckResult("models", "FAIL", "models_invalid", {})
+        with (
+            mock.patch.object(MODULE, "read_env_value", return_value="direct-secret"),
+            mock.patch.object(MODULE, "run_target", return_value=failed),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            exit_code = MODULE.main(["--allow-real-api", "--target", "direct", "--json"])
+        self.assertEqual(exit_code, 1)
+
+    def test_atomic_write_replaces_only_requested_file_and_rejects_missing_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report.json"
+            output.write_bytes(b"old")
+            MODULE.atomic_write(output, b'{"schema_version":1}')
+            self.assertEqual(output.read_bytes(), b'{"schema_version":1}')
+            self.assertEqual({entry.name for entry in root.iterdir()}, {"report.json"})
+            with self.assertRaises(MODULE.ProbeError) as raised:
+                MODULE.atomic_write(root / "missing" / "report.json", b"new")
+            self.assertEqual(raised.exception.code, "output_parent_invalid")
+
+
+class SchemaContractTests(unittest.TestCase):
+    def test_report_schema_locks_required_names_and_sanitized_enums(self):
+        with SCHEMA.open(encoding="utf-8") as stream:
+            schema = json.load(stream)
+        self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
+        self.assertEqual(set(schema["required"]), {"schema_version", "checked_at", "overall", "targets"})
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["properties"]["targets"]["properties"]), {"direct", "gateway"})
+        check = schema["$defs"]["check"]
+        self.assertEqual(set(check["properties"]["name"]["enum"]), set(MODULE.EXPECTED_CHECKS))
+        self.assertEqual(set(check["properties"]["status"]["enum"]), {"PASS", "FAIL"})
+        self.assertEqual(
+            set(check["properties"]["code"]["enum"]),
+            MODULE.TRANSPORT_ERROR_CODES | MODULE.STRUCTURE_ERROR_CODES | set(MODULE.PASS_DETAIL_KEYS),
+        )
+        self.assertFalse(check["additionalProperties"])

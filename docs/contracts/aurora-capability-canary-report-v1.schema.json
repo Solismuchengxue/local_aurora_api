@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Aurora capability canary report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "checked_at", "overall", "targets"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "checked_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "overall": {"enum": ["PASS", "FAIL"]},
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "direct": {"$ref": "#/$defs/results"},
+        "gateway": {"$ref": "#/$defs/results"}
+      }
+    }
+  },
+  "$defs": {
+    "results": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/check"}
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "code", "details"],
+      "properties": {
+        "name": {
+          "enum": [
+            "models",
+            "chat_nonstream",
+            "chat_stream",
+            "responses_nonstream",
+            "responses_stream",
+            "files",
+            "image_generation",
+            "image_edit",
+            "image_variation",
+            "audio_speech",
+            "audio_transcription",
+            "audio_translation"
+          ]
+        },
+        "status": {"enum": ["PASS", "FAIL"]},
+        "code": {
+          "enum": [
+            "models_valid",
+            "chat_nonstream_valid",
+            "chat_stream_valid",
+            "responses_nonstream_valid",
+            "responses_stream_valid",
+            "files_valid",
+            "image_generation_valid",
+            "image_edit_valid",
+            "image_variation_valid",
+            "audio_speech_valid",
+            "audio_transcription_valid",
+            "audio_translation_valid",
+            "auth_failed",
+            "upstream_forbidden",
+            "route_missing",
+            "rate_limited",
+            "upstream_failed",
+            "http_failed",
+            "timeout",
+            "connectivity_failed",
+            "response_too_large",
+            "models_invalid",
+            "chat_nonstream_invalid",
+            "chat_empty",
+            "chat_stream_invalid",
+            "responses_nonstream_invalid",
+            "responses_stream_invalid",
+            "files_invalid",
+            "image_payload_invalid",
+            "image_url_not_accepted",
+            "audio_payload_invalid",
+            "transcription_mismatch",
+            "translation_mismatch",
+            "dependency_failed"
+          ]
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "chunks": {"type": "integer", "minimum": 0},
+            "output_count": {"type": "integer", "minimum": 0},
+            "bytes": {"type": "integer", "minimum": 0},
+            "content_present": {"type": "boolean"},
+            "done": {"type": "boolean"},
+            "completed": {"type": "boolean"},
+            "created": {"type": "boolean"},
+            "output_seen": {"type": "boolean"},
+            "upload_accepted": {"type": "boolean"},
+            "file_id_present": {"type": "boolean"},
+            "answer_present": {"type": "boolean"},
+            "decodable": {"type": "boolean"},
+            "text_present": {"type": "boolean"},
+            "expected_marker_present": {"type": "boolean"},
+            "english_markers_present": {"type": "boolean"},
+            "media_type": {
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "audio/wav",
+                "audio/mpeg",
+                "audio/ogg",
+                "audio/opus",
+                "audio/flac",
+                "audio/aac",
+                "audio/webm"
+              ]
+            },
+            "dependency": {"enum": ["direct", "audio_speech"]}
+          }
+        }
+      }
+    }
+  }
+}

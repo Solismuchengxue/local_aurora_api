@@ -11,9 +11,12 @@ from datetime import datetime, timezone
 import http.client
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 import struct
+import tempfile
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -727,14 +730,132 @@ def serialize_report(report: Mapping[str, object]) -> str:
     return encoded.decode("utf-8")
 
 
+def run_target(
+    target: TargetConfig,
+    transport: Transport = http_request,
+) -> list[CheckResult]:
+    """Run EXPECTED_CHECKS in order; audio children depend on audio_speech."""
+    results = [
+        check_models(target, transport),
+        check_chat_nonstream(target, transport),
+        check_chat_stream(target, transport),
+        check_responses_nonstream(target, transport),
+        check_responses_stream(target, transport),
+        check_files(target, transport),
+        check_image_generation(target, transport),
+        check_image_edit(target, transport),
+        check_image_variation(target, transport),
+    ]
+    speech, audio = check_audio_speech(target, transport)
+    results.append(speech)
+    if audio is None:
+        results.extend(
+            [
+                CheckResult("audio_transcription", "FAIL", "dependency_failed", {"dependency": "audio_speech"}),
+                CheckResult("audio_translation", "FAIL", "dependency_failed", {"dependency": "audio_speech"}),
+            ]
+        )
+    else:
+        results.extend(
+            [
+                check_audio_transcription(target, audio, transport),
+                check_audio_translation(target, audio, transport),
+            ]
+        )
+    if tuple(item.name for item in results) != EXPECTED_CHECKS:
+        raise ProbeError("invalid_check_order")
+    return results
+
+
+def _dependency_failed_results(dependency: str) -> list[CheckResult]:
+    return [
+        CheckResult(name, "FAIL", "dependency_failed", {"dependency": dependency})
+        for name in EXPECTED_CHECKS
+    ]
+
+
+def run_matrix(
+    direct: TargetConfig,
+    gateway: TargetConfig | None,
+    *,
+    target_mode: str,
+    transport: Transport = http_request,
+) -> dict[str, list[CheckResult]]:
+    direct_results = run_target(direct, transport)
+    results = {"direct": direct_results}
+    if target_mode == "direct":
+        return results
+    if target_mode != "both" or gateway is None:
+        raise ProbeError("invalid_target_mode")
+    if any(item.status != "PASS" for item in direct_results):
+        results["gateway"] = _dependency_failed_results("direct")
+        return results
+    results["gateway"] = run_target(gateway, transport)
+    return results
+
+
+def atomic_write(output: Path, payload: bytes) -> None:
+    parent = output.parent
+    try:
+        metadata = parent.lstat()
+    except OSError as exc:
+        raise ProbeError("output_parent_invalid") from exc
+    if parent.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        raise ProbeError("output_parent_invalid")
+    try:
+        target_metadata = output.lstat()
+    except FileNotFoundError:
+        target_metadata = None
+    if target_metadata is not None and (
+        output.is_symlink() or not stat.S_ISREG(target_metadata.st_mode)
+    ):
+        raise ProbeError("output_target_invalid")
+
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output.name}.", suffix=".tmp", dir=parent
+        )
+        temporary = Path(temporary_name)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--allow-real-api", action="store_true")
+    parser.add_argument("--target", choices=("direct", "both"), default="direct")
+    parser.add_argument("--env-file", type=Path, default=Path(".env.canary"))
+    parser.add_argument(
+        "--gateway-key-file",
+        type=Path,
+        default=Path(".secrets/canary/new_api_client_token.txt"),
+    )
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
-
-
-def run_matrix() -> dict[str, list[CheckResult]]:
-    return {}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -742,7 +863,37 @@ def main(argv: list[str] | None = None) -> int:
     if not args.allow_real_api:
         print("aurora_canary=ERROR code=real_api_not_authorized", file=sys.stderr)
         return 2
-    return 2
+    try:
+        direct = TargetConfig(
+            "direct",
+            DIRECT_BASE_URL,
+            read_env_value(args.env_file, "AURORA_CANARY_AUTHORIZATION"),
+        )
+        direct_results = run_target(direct)
+        targets: dict[str, list[CheckResult]] = {"direct": direct_results}
+        if args.target == "both":
+            if any(result.status != "PASS" for result in direct_results):
+                targets["gateway"] = _dependency_failed_results("direct")
+            else:
+                gateway = TargetConfig(
+                    "gateway", GATEWAY_BASE_URL, read_single_secret(args.gateway_key_file)
+                )
+                targets["gateway"] = run_target(gateway)
+        report = build_report(targets)
+        payload = serialize_report(report)
+        if args.output is not None:
+            atomic_write(args.output, payload.encode("utf-8"))
+        if args.json:
+            print(payload)
+        else:
+            print(f"aurora_canary={report['overall']}")
+        return 0 if all(result.status == "PASS" for results in targets.values() for result in results) else 1
+    except ProbeError as exc:
+        print(f"aurora_canary=ERROR code={exc.code}", file=sys.stderr)
+        return 2
+    except ValueError:
+        print("aurora_canary=ERROR code=invalid_report", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
