@@ -148,7 +148,7 @@ def read_env_value(path: Path, key: str) -> str:
             continue
         if stripped.startswith(prefix):
             values.append(stripped[len(prefix):])
-    if len(values) != 1 or not values[0] or "\x00" in values[0]:
+    if len(values) != 1 or not values[0].strip() or "\x00" in values[0]:
         raise ProbeError("credential_invalid")
     return values[0]
 
@@ -190,6 +190,50 @@ def _validate_result(result: CheckResult) -> None:
             raise ValueError("invalid result details")
 
 
+def _validate_report(report: Mapping[str, object]) -> dict[str, object]:
+    if set(report) != {"schema_version", "checked_at", "overall", "targets"}:
+        raise ValueError("invalid report")
+    if report["schema_version"] != 1 or report["overall"] not in STATUS_ORDER:
+        raise ValueError("invalid report")
+    checked_at = report["checked_at"]
+    if not isinstance(checked_at, str) or not checked_at.endswith("Z"):
+        raise ValueError("invalid report")
+    try:
+        datetime.fromisoformat(f"{checked_at[:-1]}+00:00")
+    except ValueError as exc:
+        raise ValueError("invalid report") from exc
+    targets = report["targets"]
+    if not isinstance(targets, Mapping) or not targets or set(targets) - {"direct", "gateway"}:
+        raise ValueError("invalid report")
+    sanitized_targets: dict[str, list[dict[str, object]]] = {}
+    statuses: list[str] = []
+    for name, results in targets.items():
+        if not isinstance(results, list):
+            raise ValueError("invalid report")
+        sanitized_results = []
+        for item in results:
+            if not isinstance(item, Mapping) or set(item) != {"name", "status", "code", "details"}:
+                raise ValueError("invalid report")
+            if not isinstance(item["name"], str) or not isinstance(item["status"], str):
+                raise ValueError("invalid report")
+            if not isinstance(item["code"], str) or not isinstance(item["details"], dict):
+                raise ValueError("invalid report")
+            result = CheckResult(item["name"], item["status"], item["code"], item["details"])
+            _validate_result(result)
+            sanitized_results.append(asdict(result))
+            statuses.append(result.status)
+        sanitized_targets[name] = sanitized_results
+    expected_overall = "PASS" if statuses and all(status == "PASS" for status in statuses) else "FAIL"
+    if report["overall"] != expected_overall:
+        raise ValueError("invalid report")
+    return {
+        "schema_version": 1,
+        "checked_at": checked_at,
+        "overall": expected_overall,
+        "targets": sanitized_targets,
+    }
+
+
 def build_report(
     targets: Mapping[str, list[CheckResult]],
     checked_at: datetime | None = None,
@@ -202,16 +246,16 @@ def build_report(
     timestamp = checked_at or datetime.now(timezone.utc)
     if timestamp.tzinfo is None:
         raise ValueError("checked_at must be timezone-aware")
-    return {
+    return _validate_report({
         "schema_version": 1,
         "checked_at": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "overall": "PASS" if all(result.status == "PASS" for results in targets.values() for result in results) else "FAIL",
         "targets": {name: [asdict(result) for result in results] for name, results in targets.items()},
-    }
+    })
 
 
 def serialize_report(report: Mapping[str, object]) -> str:
-    encoded = json.dumps(report, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    encoded = json.dumps(_validate_report(report), ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
         raise ProbeError("report_too_large")
     return encoded.decode("utf-8")
