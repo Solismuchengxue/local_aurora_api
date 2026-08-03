@@ -4,6 +4,7 @@ services:
   aurora-canary:
     image: ${AURORA_CANARY_IMAGE:?set an approved immutable Aurora digest}
     container_name: aurora-capability-canary
+    user: "65532:65532"
     profiles: ["canary"]
     ports:
       - "127.0.0.1:18080:8080"
@@ -15,7 +16,7 @@ services:
     volumes:
       - type: bind
         source: ./.secrets/canary/access_tokens.txt
-        target: /access_tokens.txt
+        target: /home/nonroot/access_tokens.txt
         read_only: true
     networks:
       - canary

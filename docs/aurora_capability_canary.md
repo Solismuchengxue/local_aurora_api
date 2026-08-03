@@ -27,7 +27,8 @@
 
 ## Secret 与初始化门禁
 
-- Aurora 只挂载 `.secrets/canary/access_tokens.txt` 到容器内 `/access_tokens.txt`，且容器内为只读；不得同时挂载 `session_tokens.txt`。
+- Aurora 只挂载 `.secrets/canary/access_tokens.txt` 到容器内 `/home/nonroot/access_tokens.txt`，且容器内为只读；不得同时挂载 `session_tokens.txt`。
+- Aurora 2.5.0 镜像以 `65532:65532` 运行；FNOS 上这份专用 canary Token 文件必须归属 `65532:65532` 并保持权限 `600`，不得通过放宽为 `644` 绕过读取失败。
 - 该文件只允许包含经用户合法取得并专门放置的一行 ChatGPT access token；Codex 只核对存在性、大小、权限和挂载元数据，不读取、打印或复制正文。
 - 该文件权限必须为 `600`，不能通过放宽到 `644` 来解决 UID/GID 问题。
 - access token 快照不可续期，只用于隔离 canary 的即时能力验证，不得成为生产凭据权威。
