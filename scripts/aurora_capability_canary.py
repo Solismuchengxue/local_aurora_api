@@ -30,6 +30,7 @@ GATEWAY_BASE_URL = "http://127.0.0.1:13000"
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_DECODED_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_REPORT_BYTES = 32 * 1024
 STATUS_ORDER = {"PASS": 0, "FAIL": 1}
 EXPECTED_CHECKS = (
@@ -155,7 +156,7 @@ CHAT_PROMPT = "Reply with exactly: AURORA-CANARY-OK"
 RESPONSES_INPUT = "Reply with exactly: AURORA-CANARY-OK"
 FILE_MARKER = "AURORA-CANARY-FILE-OK"
 IMAGE_GENERATION_PROMPT = "A small synthetic blue square on a plain white background."
-IMAGE_EDIT_PROMPT = "Keep the synthetic image unchanged."
+IMAGE_EDIT_PROMPT = "Change the blue square to red while preserving the canvas size."
 REQUIRED_MODEL_IDS = {"gpt-5-6-pro", "gpt-5-6-thinking", "gpt-image-2"}
 
 
@@ -382,7 +383,71 @@ def encode_multipart(
     return f"multipart/form-data; boundary={boundary}", body
 
 
-def decode_image_result(payload: dict[str, object]) -> dict[str, object]:
+def _validate_png(image: bytes) -> None:
+    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ProbeError("image_payload_invalid")
+    offset = 8
+    ihdr: tuple[int, int, int] | None = None
+    compressed = bytearray()
+    seen_idat = False
+    idat_finished = False
+    seen_iend = False
+    while offset < len(image):
+        if len(image) - offset < 12:
+            raise ProbeError("image_payload_invalid")
+        length = struct.unpack(">I", image[offset:offset + 4])[0]
+        kind = image[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(image) or not all(65 <= byte <= 90 or 97 <= byte <= 122 for byte in kind):
+            raise ProbeError("image_payload_invalid")
+        data = image[offset + 8:offset + 8 + length]
+        expected_crc = struct.unpack(">I", image[offset + 8 + length:end])[0]
+        if zlib.crc32(kind + data) & 0xFFFFFFFF != expected_crc:
+            raise ProbeError("image_payload_invalid")
+        if kind == b"IHDR":
+            if offset != 8 or ihdr is not None or length != 13:
+                raise ProbeError("image_payload_invalid")
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", data)
+            channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+            if not width or not height or bit_depth != 8 or channels is None or (compression, filtering, interlace) != (0, 0, 0):
+                raise ProbeError("image_payload_invalid")
+            ihdr = width, height, channels
+        elif kind == b"IDAT":
+            if ihdr is None or idat_finished or not data:
+                raise ProbeError("image_payload_invalid")
+            seen_idat = True
+            compressed.extend(data)
+        elif kind == b"IEND":
+            if length or not seen_idat or end != len(image):
+                raise ProbeError("image_payload_invalid")
+            seen_iend = True
+            offset = end
+            break
+        else:
+            if kind[0] & 0x20 == 0 or ihdr is None:
+                raise ProbeError("image_payload_invalid")
+            if seen_idat:
+                idat_finished = True
+        offset = end
+    if ihdr is None or not seen_iend or offset != len(image):
+        raise ProbeError("image_payload_invalid")
+    width, height, channels = ihdr
+    row_bytes = width * channels
+    expected_size = height * (row_bytes + 1)
+    if expected_size > MAX_DECODED_IMAGE_BYTES:
+        raise ProbeError("image_payload_invalid")
+    try:
+        decoder = zlib.decompressobj()
+        pixels = decoder.decompress(bytes(compressed), expected_size + 1)
+    except zlib.error as exc:
+        raise ProbeError("image_payload_invalid") from exc
+    if len(pixels) != expected_size or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+        raise ProbeError("image_payload_invalid")
+    if any(pixels[row * (row_bytes + 1)] > 4 for row in range(height)):
+        raise ProbeError("image_payload_invalid")
+
+
+def _decode_image_payload(payload: dict[str, object]) -> tuple[bytes, str]:
     data = payload.get("data")
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
         raise ProbeError("image_payload_invalid")
@@ -399,13 +464,15 @@ def decode_image_result(payload: dict[str, object]) -> dict[str, object]:
     except (ValueError, binascii.Error) as exc:
         raise ProbeError("image_payload_invalid") from exc
     if image.startswith(b"\x89PNG\r\n\x1a\n"):
+        _validate_png(image)
         media_type = "image/png"
-    elif image.startswith(b"\xff\xd8\xff"):
-        media_type = "image/jpeg"
-    elif len(image) >= 12 and image.startswith(b"RIFF") and image[8:12] == b"WEBP":
-        media_type = "image/webp"
     else:
         raise ProbeError("image_payload_invalid")
+    return image, media_type
+
+
+def decode_image_result(payload: dict[str, object]) -> dict[str, object]:
+    image, media_type = _decode_image_payload(payload)
     return {"bytes": len(image), "media_type": media_type, "decodable": True}
 
 
@@ -417,10 +484,15 @@ def _check_image(
     body: bytes,
     content_type: str,
     transport: Transport,
+    reject_image: bytes | None = None,
 ) -> CheckResult:
     try:
         response = require_success(transport(target, "POST", path, body=body, content_type=content_type))
-        return CheckResult(name, "PASS", f"{name}_valid", decode_image_result(decode_json(response)))
+        image, media_type = _decode_image_payload(decode_json(response))
+        if reject_image is not None and image == reject_image:
+            raise ProbeError("image_payload_invalid")
+        details = {"bytes": len(image), "media_type": media_type, "decodable": True}
+        return CheckResult(name, "PASS", f"{name}_valid", details)
     except ProbeError as exc:
         return _failure(name, "image_payload_invalid", exc)
 
@@ -433,23 +505,24 @@ def check_image_generation(target: TargetConfig, transport: Transport = http_req
     )
 
 
-def _image_multipart(*, include_prompt: bool) -> tuple[str, bytes]:
+def _image_multipart(*, include_prompt: bool, image: bytes) -> tuple[str, bytes]:
     fields = {"model": "gpt-image-2", "n": "1", "size": "1024x1024", "response_format": "b64_json"}
     if include_prompt:
         fields["prompt"] = IMAGE_EDIT_PROMPT
     return encode_multipart(
         fields=fields,
-        files={"image": ("aurora-canary.png", "image/png", make_test_png())},
+        files={"image": ("aurora-canary.png", "image/png", image)},
     )
 
 
 def check_image_edit(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
-    content_type, body = _image_multipart(include_prompt=True)
-    return _check_image("image_edit", "/v1/images/edits", target, body=body, content_type=content_type, transport=transport)
+    source = make_test_png()
+    content_type, body = _image_multipart(include_prompt=True, image=source)
+    return _check_image("image_edit", "/v1/images/edits", target, body=body, content_type=content_type, transport=transport, reject_image=source)
 
 
 def check_image_variation(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
-    content_type, body = _image_multipart(include_prompt=False)
+    content_type, body = _image_multipart(include_prompt=False, image=make_test_png())
     return _check_image("image_variation", "/v1/images/variations", target, body=body, content_type=content_type, transport=transport)
 
 
@@ -535,7 +608,7 @@ def check_files(target: TargetConfig, transport: Transport = http_request) -> Ch
     try:
         content_type, upload_body = encode_multipart(
             fields={"purpose": "assistants"},
-            files={"file": ("aurora-canary.txt", "text/plain", b"AURORA CANARY SYNTHETIC FILE")},
+            files={"file": ("aurora-canary.txt", "text/plain", b"AURORA CANARY SYNTHETIC FILE\nMARKER: AURORA-CANARY-FILE-OK\n")},
         )
         upload = decode_json(require_success(transport(target, "POST", "/v1/files", body=upload_body, content_type=content_type)))
         file_id = upload.get("id")
@@ -544,7 +617,7 @@ def check_files(target: TargetConfig, transport: Transport = http_request) -> Ch
         chat_body = _json_body({
             "model": "gpt-5-6-pro",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": f"Read the file and reply with exactly: {FILE_MARKER}"},
+                {"type": "text", "text": "Read the attached file and return only the value labeled MARKER."},
                 {"type": "input_file", "file_id": file_id},
             ]}],
         })

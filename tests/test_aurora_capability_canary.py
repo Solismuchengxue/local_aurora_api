@@ -6,10 +6,12 @@ import io
 import json
 from pathlib import Path
 import sys
+import struct
 import tempfile
 import unittest
 from unittest import mock
 import wave
+import zlib
 from jsonschema import Draft202012Validator, ValidationError
 
 
@@ -454,17 +456,32 @@ def image_json(image: bytes) -> bytes:
     return json.dumps({"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}).encode("utf-8")
 
 
+def synthetic_png(rgb: bytes = b"\xd2\x2d\x2d") -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+    width = height = 2
+    pixels = b"".join(b"\x00" + rgb * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(pixels, level=9))
+        + chunk(b"IEND", b"")
+    )
+
+
 class ImageCapabilityTests(unittest.TestCase):
     def setUp(self):
         self.target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
 
     def test_generation_accepts_decodable_b64_only(self):
+        image = synthetic_png()
         result = MODULE.check_image_generation(
             self.target,
-            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png())),
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(image)),
         )
         self.assertEqual((result.status, result.code), ("PASS", "image_generation_valid"))
-        self.assertEqual(result.details["media_type"], "image/png")
+        self.assertEqual(result.details, {"bytes": len(image), "media_type": "image/png", "decodable": True})
         self.assertNotIn("b64_json", result.details)
 
     def test_image_results_reject_malformed_base64_and_url_only(self):
@@ -488,26 +505,40 @@ class ImageCapabilityTests(unittest.TestCase):
         self.assertEqual((url_only.status, url_only.code, url_only.details), ("FAIL", "image_url_not_accepted", {}))
         self.assertEqual((mixed_url.status, mixed_url.code, mixed_url.details), ("FAIL", "image_url_not_accepted", {}))
 
-    def test_image_results_accept_minimal_png_jpeg_and_webp_signatures(self):
-        for image, media_type in (
-            (MODULE.make_test_png(), "image/png"),
-            (b"\xff\xd8\xff\x00", "image/jpeg"),
-            (b"RIFF\x04\x00\x00\x00WEBP", "image/webp"),
+    def test_image_results_reject_truncated_png_jpeg_and_webp_signatures(self):
+        for image in (
+            b"\x89PNG\r\n\x1a\n",
+            b"\xff\xd8\xff",
+            b"RIFF\x04\x00\x00\x00WEBP",
         ):
-            with self.subTest(media_type=media_type):
+            with self.subTest(signature=image):
                 result = MODULE.check_image_generation(
                     self.target,
                     lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(image)),
                 )
-                self.assertEqual((result.status, result.code), ("PASS", "image_generation_valid"))
-                self.assertEqual(result.details, {"bytes": len(image), "media_type": media_type, "decodable": True})
+                self.assertEqual((result.status, result.code, result.details), ("FAIL", "image_payload_invalid", {}))
+
+    def test_image_edit_rejects_unchanged_source_and_accepts_valid_changed_png(self):
+        unchanged = MODULE.check_image_edit(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png())),
+        )
+        changed_image = synthetic_png()
+        changed = MODULE.check_image_edit(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, image_json(changed_image)),
+        )
+        self.assertEqual((unchanged.status, unchanged.code, unchanged.details), ("FAIL", "image_payload_invalid", {}))
+        self.assertEqual((changed.status, changed.code), ("PASS", "image_edit_valid"))
+        self.assertEqual(changed.details, {"bytes": len(changed_image), "media_type": "image/png", "decodable": True})
 
     def test_image_requests_use_the_expected_json_and_multipart_contracts(self):
         calls = []
 
         def transport(*args, **kwargs):
             calls.append((args, kwargs))
-            return MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png()))
+            image = synthetic_png() if args[2] == "/v1/images/edits" else MODULE.make_test_png()
+            return MODULE.HttpResponse(200, {}, image_json(image))
 
         generation = MODULE.check_image_generation(self.target, transport)
         edit = MODULE.check_image_edit(self.target, transport)
@@ -532,17 +563,36 @@ class FileCapabilityTests(unittest.TestCase):
             calls.append((args, kwargs))
             if len(calls) == 1:
                 return MODULE.HttpResponse(200, {}, b'{"id":"file-synthetic-private-id"}')
-            return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"AURORA-CANARY-FILE-OK"}}]}')
+            content = MODULE.FILE_MARKER if MODULE.FILE_MARKER.encode("ascii") in calls[0][1]["body"] else "marker-missing"
+            return MODULE.HttpResponse(200, {}, json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8"))
 
         result = MODULE.check_files(target, transport)
         self.assertEqual((result.status, result.code, result.details), ("PASS", "files_valid", {"upload_accepted": True, "file_id_present": True, "answer_present": True}))
         self.assertEqual(calls[0][0][2], "/v1/files")
         self.assertIn(b'filename="aurora-canary.txt"', calls[0][1]["body"])
-        self.assertIn(b"AURORA CANARY SYNTHETIC FILE", calls[0][1]["body"])
+        self.assertIn(MODULE.FILE_MARKER.encode("ascii"), calls[0][1]["body"])
         self.assertIn(b'name="purpose"', calls[0][1]["body"])
         self.assertEqual(calls[1][0][2], "/v1/chat/completions")
+        chat_payload = json.loads(calls[1][1]["body"])
         self.assertIn("file-synthetic-private-id", calls[1][1]["body"].decode("utf-8"))
+        self.assertNotIn(MODULE.FILE_MARKER, chat_payload["messages"][0]["content"][0]["text"])
         self.assertNotIn("file-synthetic-private-id", repr(result))
+
+    def test_files_rejects_a_backend_that_only_echoes_the_prompt(self):
+        target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+        calls = 0
+
+        def transport(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return MODULE.HttpResponse(200, {}, b'{"id":"file-synthetic-private-id"}')
+            payload = json.loads(kwargs["body"])
+            prompt = payload["messages"][0]["content"][0]["text"]
+            return MODULE.HttpResponse(200, {}, json.dumps({"choices": [{"message": {"content": prompt}}]}).encode("utf-8"))
+
+        result = MODULE.check_files(target, transport)
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "files_invalid", {}))
 
 
 def make_wav() -> bytes:
@@ -671,7 +721,8 @@ class MatrixOrchestrationTests(unittest.TestCase):
             if path == "/v1/files":
                 return MODULE.HttpResponse(200, {}, b'{"id":"synthetic-file-id"}')
             if path.startswith("/v1/images/"):
-                return MODULE.HttpResponse(200, {}, image_json(MODULE.make_test_png()))
+                image = synthetic_png() if path == "/v1/images/edits" else MODULE.make_test_png()
+                return MODULE.HttpResponse(200, {}, image_json(image))
             if path == "/v1/audio/speech":
                 return MODULE.HttpResponse(200, {"content-type": "audio/wav"}, audio)
             if path == "/v1/audio/transcriptions":
