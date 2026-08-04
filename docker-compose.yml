@@ -7,6 +7,7 @@ services:
     image: metacubex/mihomo@sha256:e1d7dadaa9368a52d420d65007e0e0d87cb148d292faa67326eda3fef5757f59
     container_name: mihomo
     ports:
+      - "127.0.0.1:7897:7890"
       - "${NAS_LAN_IP:?请先在 .env 中设置 NAS_LAN_IP}:9090:9090"
     volumes:
       - ./data/mihomo:/root/.config/mihomo

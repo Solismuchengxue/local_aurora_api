@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProductionComposeContractTests(unittest.TestCase):
+    def test_mihomo_registry_proxy_is_loopback_only(self):
+        text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(text.count('"127.0.0.1:7897:7890"'), 1)
+        self.assertNotIn("0.0.0.0:7897:7890", text)
+        self.assertNotIn("[::]:7897:7890", text)
+        self.assertNotIn("${NAS_LAN_IP}:7897:7890", text)
+        self.assertIn("PROXY_URL: http://mihomo:7890", text)
+        self.assertIn("http_proxy: http://mihomo:7890", text)
+
     def test_aurora_is_the_only_final_session_token_runtime(self):
         text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
