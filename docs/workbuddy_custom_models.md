@@ -100,4 +100,4 @@ WorkBuddy 通常使用自身的 WebSearch 工具，不依赖模型原生搜索�
 ## 凭据维护
 
 - `models.json` 含明文 New API 令牌，不要提交、截图或外发。
-- Aurora 渠道使用的 ChatGPT access token 有效期有限；到期前应在 New API 渠道中更换。
+- New API 渠道只使用稳定的 Aurora service key；ChatGPT Session Token 由 Aurora 内部换取和自然续期，失效告警后由用户更新受保护文件。

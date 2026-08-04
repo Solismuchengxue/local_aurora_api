@@ -1,6 +1,6 @@
 # 飞牛 fnOS 部署指南：aurora + new-api 反向代理 ChatGPT Web 为 OpenAI 兼容 API
 
-> 本文档基于 2026-07-26 在飞牛 fnOS 上的实际部署验证整理；2026-07-27 已完成从旧目录 `aurora-stack` 到 `local_aurora_api` 的受控切换，并验证四个服务、代理出口、模型列表和最小聊天请求。旧目录已于 2026-07-29 在确认无运行引用后删除；已校验的冷备份迁入 `backups/legacy/`。2026-07-29 又完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换，本轮只验证容器、Compose 标签、挂载、cron 和本地端口，未调用真实聊天。
+> 本文档记录唯一正式部署。2026-08-04 已批准把 Aurora 2.5.0 Session Token 方案提升为生产目标；在 FNOS checkout、容器、渠道和清理验收全部完成前，文中“最终架构”不得被理解为现场已完成。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 > 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
 > 脱敏健康状态生产器、生产 cron、Studio OS 专用只读子挂载和 n8n 工作流导入已于 2026-08-02 完成；合成异常邮件与真实 `PASS` 静默路径均已验证，工作流随后通过最终门禁并正式发布、激活。
@@ -13,16 +13,18 @@
 客户端 / OpenAI SDK
    │  base_url = http://<NAS_IP>:3000/v1
    ▼
-new-api (:3000)          ← API 网关，管理令牌、渠道、模型分发
-   │  渠道(类型 OpenAI) base_url = http://aurora:8080，密钥 = ChatGPT access_token
+new-api (:3000)          ← API 网关，管理客户端令牌、渠道和模型分发
+   │  base_url = http://aurora:8080，密钥 = Aurora service key
    ▼
-aurora (:8080)           ← ChatGPT Web → OpenAI 兼容反向代理（透传 Bearer token）
+aurora (:8080)           ← ChatGPT Web → OpenAI 兼容反向代理（校验 service key）
    │  http_proxy = http://mihomo:7890   （仅 aurora 走代理）
    ▼
 mihomo (:7890)           ← Clash.Meta 内核，GLOBAL 锁定 🇸🇬 新加坡 GPT 解锁节点
    │
    ▼
 ChatGPT (api.openai.com / chatgpt.com)
+
+.secrets/session_tokens.txt ──只读挂载──▶ Aurora 内部换取/续期 Access Token
 ```
 
 辅助组件：
@@ -38,13 +40,12 @@ ChatGPT (api.openai.com / chatgpt.com)
 | 项目 | 说明 |
 |---|---|
 | 飞牛 fnOS | 已安装 Docker，当前用户在 docker 组 |
-| ChatGPT access_token | 形如 `eyJ...` 的 JWT；有效期有限，在 new-api 渠道密钥里填入（见 §8） |
+| ChatGPT session token | 写入受保护的 Session Token 文件，由 Aurora 内部换取和自然续期 Access Token |
+| Aurora service key | 写入 `.env` 的 `AURORA_AUTHORIZATION`，并作为 New API 渠道密钥 |
 | mihomo 订阅 | 机场**订阅链接**，需包含 **新加坡 GPT 解锁节点**；经 mihomo WebUI 导入 |
 | 访问方式 | 能用 SSH 登录 NAS（密钥或密码），或用飞牛内置终端 |
 
-> 🔑 **获取 ChatGPT access_token**：浏览器登录 ChatGPT 后，访问 <https://chatgpt.com/api/auth/session> ，在返回的 JSON 中找到 `accessToken` 字段（`eyJ...` 那串）即为 token。
->
-> ⚠️ **token 安全**：token 等同 ChatGPT 网页登录态，不要外泄、不要写进会公开的文档/镜像。
+> ⚠️ **Token 安全**：Session Token 等同 ChatGPT 网页登录态，不要外泄、不要写进文档、镜像、日志或 Git。
 
 ---
 
@@ -70,13 +71,14 @@ ChatGPT (api.openai.com / chatgpt.com)
 
 ```
 /vol1/YOUR_USER_ID/Solis_Aurora_Gateway/
-├── .env                         # 本机 SESSION_SECRET，不提交
+├── .env                         # SESSION_SECRET、AURORA_AUTHORIZATION、NAS_LAN_IP，不提交
+├── .secrets/
+│   └── session_tokens.txt       # 权限 600，归属 65532:65532，不提交
 ├── docker-compose.yml
 ├── config/
 │   └── mihomo/
 │       └── config.example.yaml # 首次启动示例
-├── backups/
-│   └── legacy/                 # 本地旧栈冷备份，正文不提交
+├── backups/                    # 当前正式栈恢复包，正文不提交
 └── data/
     ├── mihomo/
     │   └── config.yaml         # 运行配置，会被订阅或 WebUI 更新
@@ -88,20 +90,27 @@ ChatGPT (api.openai.com / chatgpt.com)
 ```bash
 cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 cp .env.example .env
-mkdir -p data/mihomo data/new-api backups/legacy
+mkdir -p data/mihomo data/new-api .secrets
+install -m 600 /dev/null .secrets/session_tokens.txt
 cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 ```
 
 编辑 `.env`：
 
 - 把 `SESSION_SECRET` 设为 `openssl rand -hex 16` 生成的随机值。
+- 把 `AURORA_AUTHORIZATION` 设为另一枚独立随机服务密钥；New API 渠道密钥必须使用同一值。
 - 把 `NAS_LAN_IP` 设为 NAS 的局域网 IPv4 地址，例如 `192.168.0.38`。该值用于限制 Mihomo 控制端口的监听网卡。
+
+把 Session Token 写入 `.secrets/session_tokens.txt`，然后设置归属与权限：
+
+```bash
+chown 65532:65532 .secrets/session_tokens.txt
+chmod 600 .secrets/session_tokens.txt
+```
 
 只在首次部署时复制 Mihomo 示例配置；已有 `data/mihomo/config.yaml` 时不要覆盖。
 
-> 本栈不挂载 `access_tokens.txt`：token 在 New API 渠道密钥里填写，再通过 Aurora 的外部 token 能力使用（见 §8）。Aurora 也支持自己的 token 文件账号池，但那是另一种部署方式，本项目没有采用。包含数据库、配置或凭据的归档只放在被 Git 忽略的 `backups/`；项目级备份必须排除该目录，避免递归打包。
->
-> **旧部署迁移边界**：2026-07-26 的 NAS 只读盘点发现，仍在运行的旧目录使用 `mihomo/`、`new-api-data/`，并向 Aurora 挂载 `access_tokens.txt`。本节描述的是当前仓库的新目标结构，不能直接覆盖旧目录。迁移前必须先备份并校验，保持原 `SESSION_SECRET`，再决定是否继续保留账号池挂载。
+> 本栈只挂载一个 Session Token 文件，不挂载 `access_tokens.txt`，也不允许 New API 把 ChatGPT Token 当作渠道密钥。包含数据库、配置或凭据的归档只放在被 Git 忽略的 `backups/`；项目级备份必须排除该目录，避免递归打包。
 
 ---
 
@@ -113,8 +122,8 @@ cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 
 - Mihomo 和 New API 的可变数据统一写入被 Git 忽略的 `data/`。
 - Mihomo 的 `7890` 只在 Compose 网络内提供给 Aurora；`9090` 仅绑定 `NAS_LAN_IP`。
-- Aurora 显式设置 `PROXY_URL`、`http_proxy` 和 `ENABLE_EXTERNAL_TOKEN`。
-- `SESSION_SECRET` 与 `NAS_LAN_IP` 必须从本地 `.env` 提供；缺失时 Compose 会直接报错。
+- Aurora 显式设置 `PROXY_URL`、`http_proxy`、`Authorization` 和 `ENABLE_EXTERNAL_TOKEN=false`，并以 `65532:65532` 读取只读 Session Token 挂载。
+- `SESSION_SECRET`、`AURORA_AUTHORIZATION` 与 `NAS_LAN_IP` 必须从本地 `.env` 提供；缺失时 Compose 会直接报错。
 
 > 镜像拉取：镜像源配置见 §2，飞牛 daemon 已配 `registry-mirrors`（docker.fnnas.com），`ghcr.io` 与 `metacubex/mihomo` 均可直连。
 
@@ -196,11 +205,11 @@ New API 镜像**首次启动是未初始化状态**，默认 `root/123456` 登�
    - 类型：**OpenAI**
    - 名称：`aurora`（随意）
    - 基座地址：`http://aurora:8080`（compose 网络内用容器名）
-   - 密钥：**填你的 ChatGPT access_token**（即 `eyJ...` 那串，获取方式见 §1）
+   - 密钥：填写 `.env` 中 `AURORA_AUTHORIZATION` 的同一服务密钥
    - 模型：填 `*` （或留空，后续从上游获取）
 3. 保存
 
-> 💡 **为什么 Compose 没有 token 文件**：New API 渠道密钥中填写 ChatGPT token，并通过 `Authorization: Bearer <token>` 交给已启用 `ENABLE_EXTERNAL_TOKEN` 的 Aurora。§11.1 的可选定时任务会更新这条渠道记录，不改变容器的凭据路径；任何 `.secrets/` 文件都不得提交。
+> New API 只持有 Aurora service key；ChatGPT Session Token 只存在于受保护的只读挂载中。两者用途不同，不得互换或输出。
 
 ### ⚠️ 必须做的一步：从上游获取模型
 
@@ -338,40 +347,14 @@ Aurora 没有 ChatGPT Deep Research 的一键端点。由于使用频率很低�
 
 ## 11. 维护与排障
 
-### 11.1 ChatGPT token 定时续期
+### 11.1 Session Token 内建自然续期
 
-access token 有效期有限。基础模式需要在过期前手动更新 New API 渠道密钥。默认的单机 SQLite 部署可启用项目脚本自动维护：
+唯一正式 Aurora 只读挂载 `.secrets/session_tokens.txt`。Aurora 2.5.0 在启动时用 Session Token 换取 Access Token，并由内部后台健康检查续期已过期的 Session/Refresh 账号。
 
-1. 在 `.secrets/session_tokens.txt` 中保存一条 ChatGPT session token，文件权限设为 `600`。
-2. 在 New API 渠道页面确认 Aurora 渠道 ID；单渠道首次部署通常为 `1`。
-3. 先做不修改文件的检查，再强制执行一次完整续期：
-
-   ```bash
-   python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --dry-run
-   python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --force
-   ```
-
-   如果 session 接口此刻仍返回渠道正在使用的同一枚 token，强制运行会以
-   `session exchange did not extend token expiry` 安全退出，不修改数据库。
-   定时任务会在后续检查中继续尝试。
-
-4. 添加用户级 cron，每天 04:17 和 16:17 检查；脚本只在剩余不足 72 小时时执行换取和更新：
-
-   ```cron
-   17 4,16 * * * cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway && /usr/bin/python3 scripts/refresh_chatgpt_access_token.py --channel-id 1 --threshold-hours 72 >> .secrets/token-refresh.log 2>&1
-   ```
-
-安全与回滚行为：
-
-- session/access token 和响应正文不会写入日志。
-- 同一时刻只允许一个续期进程。
-- 新 token 必须具有更晚的 JWT 到期时间，否则拒绝覆盖。
-- 写入前先用新 token 直测 Aurora 的模型列表和最小聊天；响应必须具有合法的 OpenAI completion 结构。Aurora 已实测会偶发返回 HTTP 200 空正文，这仍能证明鉴权和请求链路成立，不作为 token 失效依据；结构无效或请求报错时才切换思考模型复验。
-- 使用比较并交换的 SQLite 事务更新渠道，若渠道同时被人工修改则拒绝覆盖。
-- 更新后重启 New API 清理渠道缓存，并使用现有启用的客户端令牌验证模型列表、鉴权和聊天响应结构；失败时自动恢复旧渠道密钥并再次验证。
-- 旧 token 保存在 `.secrets/access_tokens.previous.txt`，成功后的当前 token 同步到 `.secrets/access_tokens.txt`，权限均为 `600`。
-- Aurora 自带的账号池在当前镜像上实测存在路径、权限和账号可用性问题，因此这里不挂载任何 token 文件。
-- 脚本只支持项目默认的 `data/new-api/one-api.db`；改用 MySQL 或 PostgreSQL 后不要启用此 cron。
+- New API 渠道密钥始终是 `AURORA_AUTHORIZATION`，不会因 ChatGPT Access Token 到期而改变。
+- 不安装旧外部换新脚本，不保留 04:17/16:17 外部换新 cron、刷新日志或旧 Token 回退副本。
+- Aurora 无法自愈时由 05:12/17:12 健康状态和 05:15/17:15 n8n 告警通知；不得增加补偿换新脚本或自动重建，用户手工更新 Session Token 后再按受控门禁重建唯一正式 Aurora。
+- Session Token 文件必须保持 `600` 和 `65532:65532`，不得通过放宽权限解决读取失败。
 
 ### 11.2 一键只读健康检查
 
@@ -397,8 +380,8 @@ python3 scripts/check_stack_health.py \
   "overall": "PASS",
   "checks": [
     {"name": "containers", "status": "PASS", "summary": "4/4 运行，重启次数均为 0", "details": {"running": 4}},
-    {"name": "database", "status": "PASS", "summary": "数据库完整，Token 剩余 168 小时", "details": {"integrity": "ok"}},
-    {"name": "refresh_log", "status": "PASS", "summary": "最新事件为 refresh_skipped", "details": {"event": "refresh_skipped", "invalid_lines": 0}},
+    {"name": "database", "status": "PASS", "summary": "数据库完整，正式 Aurora 渠道与服务密钥一致", "details": {"integrity": "ok", "channel_base_matches": true, "service_key_matches": true}},
+    {"name": "refresh_log", "status": "PASS", "summary": "Access Token 由 Aurora 内部自然续期，外部刷新日志不适用", "details": {"mode": "aurora_internal", "external_refresh": "not_applicable"}},
     {"name": "mihomo", "status": "PASS", "summary": "GLOBAL / SG / Singapore Node", "details": {"mode": "GLOBAL", "selected": "Singapore Node", "country": "SG"}},
     {"name": "models", "status": "PASS", "summary": "模型范围严格等于 pro、thinking", "details": {"model_ids": ["gpt-5-6-pro", "gpt-5-6-thinking"]}},
     {"name": "chat", "status": "PASS", "summary": "pro 返回结构合法的非空 completion", "details": {"model": "gpt-5-6-pro", "content_empty": false, "fallback_used": false}}
@@ -409,8 +392,8 @@ python3 scripts/check_stack_health.py \
 检查范围包括：
 
 - 四个生产容器均为 running 且重启次数为 0；
-- New API SQLite 完整性、渠道 Token 剩余时间和可用客户端令牌；
-- 最新定时续期事件；
+- New API SQLite 完整性、正式渠道地址、服务密钥一致性和可用客户端令牌；
+- Aurora 内建自然续期模式，外部刷新日志固定为不适用；
 - Mihomo GLOBAL 模式、当前节点和经代理确认的 `SG` 出口；
 - 对外模型严格等于 `gpt-5-6-pro`、`gpt-5-6-thinking`；
 - 一次真实 New API 聊天请求及 OpenAI completion 结构。
@@ -421,7 +404,7 @@ python3 scripts/check_stack_health.py \
 
 ### 11.3 n8n 离线健康状态生产器（已部署并激活）
 
-`scripts/write_n8n_health_status.py` 是与完整健康检查隔离的生产器。它只读取限定的 Docker 元数据、本地 TCP、SQLite 渠道 Token 到期元数据以及续期锁/日志白名单字段，原子替换一个固定 Schema v1 的脱敏 `latest.json`；不调用模型、聊天、代理出口或外部 API。
+`scripts/write_n8n_health_status.py` 是与完整健康检查隔离的生产器。它只读取限定的 Docker 元数据、本地 TCP、SQLite 正式渠道地址与服务密钥一致性，并发布固定的“外部刷新不适用”状态，原子替换一个固定 Schema v1 的脱敏 `latest.json`；不调用模型、聊天、代理出口或外部 API。
 
 2026-08-01 的 FNOS 只读预检确认：Mihomo 容器桥接地址的 `9090` 可达，但 FNOS 主机回环访问其指定 LAN 发布地址超时。生产器因此仍先验证 `docker port` 返回合法发布绑定，再仅对 Mihomo 使用限定 `docker inspect` 动态取得容器桥接 IPv4 做 TCP 建连；其余三个服务继续检查本机发布地址。任何实际地址都不会写入状态文件。
 
@@ -440,7 +423,7 @@ python3 scripts/write_n8n_health_status.py \
 - `1`：已发布 `FAIL`；
 - `2`：生产器自身错误，未发布新状态。
 
-已安装的用户 cron 使用 `Asia/Shanghai` 的 05:12 和 17:12，位于既有 04:17/16:17 续期检查开始后 55 分钟：
+已安装的用户 cron 使用 `Asia/Shanghai` 的 05:12 和 17:12；外部 Token 换新 cron 已退役：
 
 ```cron
 12 5,17 * * * cd /vol1/1000/Solis_Aurora_Gateway && /usr/bin/python3 scripts/write_n8n_health_status.py --root /vol1/1000/Solis_Aurora_Gateway --output /vol1/1000/Solis_Studio_OS/data/ops/aurora-gateway/latest.json --channel-id 1 >/dev/null 2>&1

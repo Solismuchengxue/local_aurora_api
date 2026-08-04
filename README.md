@@ -13,7 +13,7 @@ Solis_Aurora_Gateway 是一套面向飞牛 fnOS 的 Docker Compose 部署配置�
 
 - 飞牛 fnOS 已安装 Docker 和 Docker Compose。
 - 当前用户能够运行 Docker。
-- 已准备可用的 ChatGPT access token。
+- 已准备可用的 ChatGPT session token。
 - 已准备 Mihomo 兼容的代理订阅。
 
 ## 首次启动
@@ -24,23 +24,24 @@ Solis_Aurora_Gateway 是一套面向飞牛 fnOS 的 Docker Compose 部署配置�
 cd /vol1/YOUR_USER_ID/Solis_Aurora_Gateway
 ```
 
-创建本地环境文件，填写随机 `SESSION_SECRET` 和 NAS 的局域网 IPv4 地址：
+创建本地环境文件，填写随机 `SESSION_SECRET`、独立的 `AURORA_AUTHORIZATION` 服务密钥和 NAS 的局域网 IPv4 地址：
 
 ```bash
 cp .env.example .env
 openssl rand -hex 16
 ```
 
-把生成的值写入 `.env` 的 `SESSION_SECRET`，并把 `NAS_LAN_IP` 设置为 NAS 的局域网 IPv4 地址，例如 `192.168.0.100`。不要提交或分享 `.env`。
+分别生成并填写 `SESSION_SECRET` 与 `AURORA_AUTHORIZATION`，再把 `NAS_LAN_IP` 设置为 NAS 的局域网 IPv4 地址，例如 `192.168.0.100`。不要提交或分享 `.env`。
 
 初始化运行目录：
 
 ```bash
-mkdir -p data/mihomo data/new-api backups/legacy
+mkdir -p data/mihomo data/new-api .secrets
+install -m 600 /dev/null .secrets/session_tokens.txt
 cp config/mihomo/config.example.yaml data/mihomo/config.yaml
 ```
 
-只在首次部署时复制 Mihomo 示例配置；已有配置时不要覆盖。
+把 ChatGPT session token 写入 `.secrets/session_tokens.txt`，并把文件归属设置为容器用户 `65532:65532`。只在首次部署时复制 Mihomo 示例配置；已有配置时不要覆盖。
 
 启动服务：
 
@@ -74,11 +75,9 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 WorkBuddy 还需要关闭工具调用并避免 URL 自动拼接错误，详见 [WorkBuddy 自定义模型踩坑指南](docs/workbuddy_custom_models.md)。
 
-## 可选：定时续期
+## Token 自然续期
 
-项目提供不依赖第三方 Python 包的续期脚本。它每天由 NAS 的 cron 检查两次，只在 access token 剩余不足 72 小时时才使用本地 session token 换新；新 token 会先直连 Aurora 验证，再以 SQLite 事务更新 New API 渠道，并通过完整链路执行真实聊天请求、校验响应结构。Aurora 已实测会偶发返回 HTTP 200 空内容，因此续期成败不以本轮正文非空为条件。
-
-更新失败时会恢复旧渠道密钥。此模式适用于本项目默认的单机 SQLite 部署，完整配置见部署指南的“ChatGPT token 定时续期”。
+唯一正式 Aurora 直接只读挂载 `session_tokens.txt`。Aurora 启动时用 Session Token 换取 Access Token，并由上游实现的后台健康检查自然续期；New API 渠道只保存 `AURORA_AUTHORIZATION` 服务密钥，不保存 ChatGPT Token。项目不再安装外部 Token 换新 cron，也不保留旧 Aurora 或 canary 作为回退实例。
 
 ## 一键健康检查
 
@@ -88,7 +87,7 @@ WorkBuddy 还需要关闭工具调用并避免 URL 自动拼接错误，详见 [
 python3 scripts/check_stack_health.py
 ```
 
-脚本只读检查四个容器、SQLite 与 Token、续期日志、Mihomo GLOBAL/新加坡出口、正式模型范围和一次真实聊天链路。使用 `--json` 可输出机器可读结果；存在失败项时退出码为 `1`。脚本不会输出凭据或聊天正文。
+脚本只读检查四个容器、SQLite 渠道与正式服务密钥的一致性、Mihomo GLOBAL/新加坡出口、正式模型范围和一次真实聊天链路。使用 `--json` 可输出机器可读结果；存在失败项时退出码为 `1`。脚本不会输出凭据或聊天正文。
 
 ## 已实测能力
 
@@ -107,7 +106,7 @@ python3 scripts/check_stack_health.py
 ## 使用限制
 
 - 本项目使用 ChatGPT Web 登录态，不是 OpenAI 官方 API。
-- access token 会过期，需要在 New API 渠道中定期更新。
+- Session Token 仍可能被上游吊销或失效；Aurora 无法自行恢复时由健康告警通知，人工更新受保护文件。
 - 思考档不会向第三方客户端返回可见的思考过程。
 - 模型联网搜索的引用标记偶有乱码或截断。
 - `7890` 只供 Compose 内部的 Aurora 使用，不发布到 NAS；`9090` 仅绑定 `.env` 指定的局域网 IPv4 地址。

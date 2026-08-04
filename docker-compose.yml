@@ -13,15 +13,22 @@ services:
     restart: unless-stopped
 
   aurora:
-    # 2026-07-27 NAS 已验证基线；上游镜像未提供版本标签
-    image: ghcr.io/aurora-develop/aurora@sha256:e5c3b823367dc45d2b1a9c43714cb07f3800cc8ca89ac037550ae37393fcbe14
+    # 2026-08-04 已验证的 Aurora 2.5.0 linux/amd64 固定 digest
+    image: ghcr.io/aurora-develop/aurora@sha256:358533a8cd6355222297c699338fe6cdc024c6f3d951fb2fb03422350b9b7627
     container_name: aurora
+    user: "65532:65532"
     ports:
       - "8080:8080"
     environment:
+      Authorization: ${AURORA_AUTHORIZATION:?请先在 .env 中设置 AURORA_AUTHORIZATION}
       PROXY_URL: http://mihomo:7890
       http_proxy: http://mihomo:7890
-      ENABLE_EXTERNAL_TOKEN: "true"
+      ENABLE_EXTERNAL_TOKEN: "false"
+    volumes:
+      - type: bind
+        source: ./.secrets/session_tokens.txt
+        target: /home/nonroot/session_tokens.txt
+        read_only: true
     depends_on:
       - mihomo
     restart: unless-stopped

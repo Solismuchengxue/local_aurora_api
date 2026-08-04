@@ -1,7 +1,7 @@
 # Solis_Aurora_Gateway 设计
 
 状态：已采用
-最近更新：2026-07-26
+最近更新：2026-08-04
 
 ## 目标
 
@@ -17,7 +17,7 @@ OpenAI 兼容客户端
         │
         ▼
 New API :3000
-        │  Authorization: Bearer <ChatGPT access token>
+        │  Authorization: Bearer <Aurora service key>
         ▼
 Aurora :8080
         │  PROXY_URL / http_proxy
@@ -27,7 +27,7 @@ Mihomo :7890 ───── MetaCubeXD :9097
         ▼
 ChatGPT Web 上游
 
-session_tokens.txt ── 定时续期脚本 ──▶ New API 渠道密钥
+session_tokens.txt ──只读挂载──▶ Aurora 内部换取与自然续期 Access Token
 ```
 
 New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora 显式发送的代理流量；MetaCubeXD 通过 Mihomo 控制端口管理配置。
@@ -53,11 +53,12 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 ### 凭据
 
-- New API 渠道密钥把 ChatGPT access token 传给已启用外部 token 的 Aurora。
-- [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)支持 access、refresh 和 session token 账号池；当前镜像的账号池路径、权限和可用性实测不稳定，因此正式路径不依赖账号池。
-- 定时任务经 Mihomo 使用 session token 换取新 access token，直测 Aurora 后以 SQLite 事务更新 New API 渠道密钥，重启 New API 清理缓存，再通过现有客户端令牌验证模型列表、鉴权和聊天响应结构。上游偶发的 HTTP 200 空正文不等同于 token 失效，不应触发凭据回滚。
-- `.secrets/access_tokens.txt` 和 `.secrets/session_tokens.txt` 只作本地续期输入与恢复副本，不挂载到容器，不得提交、打印或外发。
-- New API 的 `SESSION_SECRET` 只允许存放在被忽略的 `.env` 中。
+- New API 渠道地址固定为 `http://aurora:8080`，渠道密钥与 `.env` 中的 `AURORA_AUTHORIZATION` 服务密钥一致；New API 不保存 ChatGPT Token。
+- 唯一正式 Aurora 使用官方 2.5.0 固定 digest，以 `65532:65532` 运行，并把 `.secrets/session_tokens.txt` 只读挂载到 `/home/nonroot/session_tokens.txt`。
+- [Aurora 官方文档](https://github.com/aurora-develop/aurora#readme)说明 Session Token 会在启动时换取 Access Token，后台健康检查每 10 分钟续期已过期的 Session/Refresh 账号。正式路径采用该内建机制，不再安装外部换新 cron。
+- `ENABLE_EXTERNAL_TOKEN=false`，客户端或 New API 不能再把 ChatGPT Access Token 作为 Aurora Bearer 凭据临时注入。
+- Session Token 或服务密钥不得提交、打印或外发。受保护文件必须保持权限 `600`；Session Token 文件归属容器用户 `65532:65532`。
+- New API 的 `SESSION_SECRET` 与 Aurora 的 `AURORA_AUTHORIZATION` 只允许存放在被忽略的 `.env` 中。
 
 ### 运行数据
 
@@ -75,16 +76,14 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 
 ### 能力边界
 
-- 日常对话使用 `gpt-5-6-pro`，复杂分析、代码和规划通过切换到 `gpt-5-6-thinking` 实现。
-- 当前 Aurora 构建会拒绝 `reasoning_effort` 和 `reasoning.effort`；它们不是已采用的思考强度控制方式。
+- 已在隔离的 Aurora 2.5.0 Session Token 候选上验证 `gpt-4o`、`gpt-5-6-pro` 和 `gpt-5-6-thinking` 最小聊天链路；正式切换后仍需经唯一生产入口复验。
 - `gpt-5-6-thinking` 不向第三方客户端返回可见的 `reasoning_content`，不能把思考档描述成可查看思维链。
 - `gpt-5-6-pro` 和 `gpt-5-6-thinking` 均可触发 ChatGPT 原生联网搜索；该能力来自上游模型，不是客户端搜索工具。
-- 图片生成虽有 Aurora 接口，但当前部署的真实 `/v1/images/generations` 请求仍以 HTTP 403 失败于 `sentinel prepare failed`，因此不是可用能力；New API 的渠道模型测试显示成功不能作为出图证据，正式配置已从渠道、客户端令牌范围和 abilities 中隐藏 `gpt-image-2`。
-- Deep Research 没有一键端点；该低频能力不纳入正式架构，项目不提供相关脚本。
+- Aurora 2.5.0 上游公开聊天、Responses、文件问答、图片生成/编辑/变体、TTS、语音转写和音频翻译接口；是否对外开放以每项真实生产探针为准，路由存在或模型列表不能代替能力验收。
 
 ### 第三方组件
 
-- 容器镜像固定到 2026-07-27 NAS 已验证运行的不可变 digest，没有引入新的软件包。
+- Aurora 固定到 2026-08-04 已核对的官方 2.5.0 digest；其余容器继续使用既有不可变 digest，没有引入新的软件包。
 - WatchCow 是可选第三方增强，不是核心运行依赖。
 - 不直接使用可漂移的 `latest` 标签。升级时一次只更新一个服务的 digest，并在 NAS 完成运行状态、数据、代理出口和 API 验证后再接受新基线。
 
@@ -93,22 +92,21 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - [飞牛 fnOS 部署指南](docs/fnos_deployment.md)
 - [WorkBuddy 自定义模型踩坑指南](docs/workbuddy_custom_models.md)
 
-## 已知待验证项
+## 部署状态
 
 - 2026-07-26 的 NAS 只读复验确认：旧部署目录中的 Compose 可以解析，四个目标容器均在运行，Mihomo 保持 GLOBAL 模式且出口国家为新加坡，New API 鉴权后的模型列表包含两个聊天模型。
 - 2026-07-27 已完成到 `local_aurora_api` 的受控切换；四个容器的 Compose 工作目录和持久化挂载均指向新结构，GLOBAL、新加坡出口、模型列表和最小聊天请求均验证通过。
 - 2026-07-29 已完成到 `/vol1/1000/Solis_Aurora_Gateway` 的运行路径切换；四个容器、两处持久化挂载和用户 cron 均使用新路径，本地端口 4/4 通过。该次路径切换没有复验代理出口、模型或真实聊天；历史路径已在最终备份和退役门禁通过后删除。
-- 首次切换曾通过本地 override 挂载旧 Aurora 账号池，同时保留外部 token；该挂载不再作为定时续期的正式依赖。
-- session token 本身可以经新加坡代理换取新 access token，但 Aurora 当前构建无法稳定使用 session/access-token 账号池，因此采用外部定时脚本更新 New API 的 SQLite 渠道记录。
-- 旧目录 `aurora-stack` 已于 2026-07-29 在确认无容器、cron 或进程引用后删除；已校验的冷备份迁入 `backups/legacy/`，用于必要时回滚。
+- 2026-08-04 已完成 Aurora 2.5.0 Session Token 隔离验证并批准收敛：仓库目标只保留唯一生产 Compose；FNOS 切换、旧/canary 清理和最终生产探针仍以现场验收结果为准。
+- 最终收敛不保留旧 Aurora、canary 或其冷备份作为回退；`backups/` 只允许保存当前正式栈按维护门禁创建的恢复包。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
-- 当前 Compose 已固定四个已验证镜像 digest；尚未执行任何镜像升级，未来升级仍需逐项受控试验。
+- 当前 Compose 已把 Aurora 更新为批准的 2.5.0 固定 digest；在 FNOS checkout 快进和唯一正式容器重建完成前，这只是仓库目标状态，不得提前称为现场已完成。
 - 已完成 `scripts/write_n8n_health_status.py` 的 Windows 实现、模拟测试和 FNOS 部署；生产 cron 在 `Asia/Shanghai` 的 05:12、17:12 原子更新单一滚动 `latest.json`，不调用模型、聊天、代理出口或外部 API。
 
 ## n8n 离线健康状态边界
 
 - Aurora 是自身运行状态的生产者和权威来源；Studio OS/n8n 只能消费状态，不能通过状态链路反向修改 Aurora、容器、数据库、Token、Compose 或 cron。
-- 生产器固定汇总容器、运行契约、本地 TCP、SQLite/渠道 Token 元数据和续期事件五项检查，以原子替换方式发布单个 `latest.json`；文件最大 16 KiB，不生成状态历史。
+- 生产器固定汇总容器、运行契约、本地 TCP、SQLite/正式渠道服务密钥一致性和固定的内建续期模式五项检查，以原子替换方式发布单个 `latest.json`；文件最大 16 KiB，不生成状态历史。
 - 本地 TCP 检查仍要求四个批准端口具有合法 Docker 发布绑定；由于 FNOS 主机不能稳定回环到 Mihomo 的指定 LAN 发布地址，Mihomo 服务可达性改用运行时发现的容器桥接 IPv4 验证，地址仅在内存中使用且不进入状态。
 - 状态只允许固定 Schema、状态码、布尔值、计数、固定事件枚举和 UTC 时间，不包含凭据、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志、命令输出或异常正文。
 - 文件型状态生产、挂载、读取和校验不新增或复用 Credential；现有 SMTP Credential 只用于异常通知。2026-08-02 已完成 FNOS 现场验证、状态目录与 cron 部署，并在 `/exchange` 读写父挂载之上增加 `/exchange/ops/aurora-gateway` 专用只读子挂载；`docker inspect`、容器内失败写入哨兵和父目录独立读写均验证通过。

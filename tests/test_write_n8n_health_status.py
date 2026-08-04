@@ -64,21 +64,22 @@ def make_results(status: str = "PASS") -> dict[str, object]:
         ),
         "database": MODULE.CheckResult(
             "PASS",
-            "database_and_token_valid",
+            "database_and_service_key_valid",
             {
                 "integrity_ok": True,
-                "remaining_seconds": 604800,
-                "expires_at": "2026-08-08T09:12:00Z",
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": True,
             },
         ),
         "refresh_log": MODULE.CheckResult(
             "PASS",
-            "refresh_recent",
+            "refresh_not_applicable",
             {
-                "event": "refresh_skipped",
-                "valid_records": 1,
+                "event": "not_applicable",
+                "valid_records": 0,
                 "invalid_records": 0,
-                "event_at": "2026-08-01T09:07:00Z",
+                "event_at": "2026-08-01T09:12:00Z",
             },
         ),
     }
@@ -90,11 +91,12 @@ class DocumentTests(unittest.TestCase):
         warning = make_results()
         warning["database"] = MODULE.CheckResult(
             "WARN",
-            "token_near_expiry",
+            "database_invalid",
             {
                 "integrity_ok": True,
-                "remaining_seconds": 3600,
-                "expires_at": "2026-08-01T10:12:00Z",
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": False,
             },
         )
         self.assertEqual(MODULE.overall_status(warning), "WARN")
@@ -131,11 +133,12 @@ class DocumentTests(unittest.TestCase):
         results = make_results()
         results["database"] = MODULE.CheckResult(
             "PASS",
-            "database_and_token_valid",
+            "database_and_service_key_valid",
             {
                 "integrity_ok": True,
-                "remaining_seconds": 604800,
-                "expires_at": "2026-08-08T09:12:00Z",
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": True,
                 "raw": "private-text",
             },
         )
@@ -164,7 +167,7 @@ class DocumentTests(unittest.TestCase):
         )
 
         results["database"] = MODULE.CheckResult(
-            "PASS", "database_and_token_valid", service_details
+            "PASS", "database_and_legacy_token_valid", service_details
         )
         with self.assertRaises(ValueError):
             MODULE.build_document(results, datetime.now(timezone.utc))
@@ -225,7 +228,18 @@ class DockerCheckTests(unittest.TestCase):
         root = "/vol1/1000/Solis_Aurora_Gateway"
         return {
             "aurora": MODULE.ContainerSnapshot(
-                "aurora", "running", 0, "aurora-stack", root, ()
+                "aurora",
+                "running",
+                0,
+                "aurora-stack",
+                root,
+                (
+                    MODULE.MountSnapshot(
+                        "/home/nonroot/session_tokens.txt",
+                        f"{root}/.secrets/session_tokens.txt",
+                        False,
+                    ),
+                ),
             ),
             "new-api": MODULE.ContainerSnapshot(
                 "new-api",
@@ -299,13 +313,29 @@ class DockerCheckTests(unittest.TestCase):
             + (MODULE.MountSnapshot("/extra", "/unapproved", True),),
         )
         self.assertFalse(MODULE.check_runtime_contract(snapshots).details["mounts_match"])
+        snapshots = self.snapshots()
+        snapshots["aurora"] = MODULE.ContainerSnapshot(
+            "aurora",
+            "running",
+            0,
+            "aurora-stack",
+            "/vol1/1000/Solis_Aurora_Gateway",
+            (
+                MODULE.MountSnapshot(
+                    "/home/nonroot/session_tokens.txt",
+                    "/vol1/1000/Solis_Aurora_Gateway/.secrets/session_tokens.txt",
+                    True,
+                ),
+            ),
+        )
+        self.assertFalse(MODULE.check_runtime_contract(snapshots).details["mounts_match"])
 
     def test_collect_snapshots_uses_only_bounded_inspect_formats(self):
         calls = []
         outputs = iter(
             [
                 "/aurora\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
-                "",
+                "/home/nonroot/session_tokens.txt\t/vol1/1000/Solis_Aurora_Gateway/.secrets/session_tokens.txt\tfalse\n",
                 "/new-api\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
                 "/data\t/vol1/1000/Solis_Aurora_Gateway/data/new-api\ttrue\n",
                 "/mihomo\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
@@ -330,7 +360,7 @@ class DockerCheckTests(unittest.TestCase):
         outputs = iter(
             [
                 "/aurora\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
-                "\n",
+                "/home/nonroot/session_tokens.txt\t/vol1/1000/Solis_Aurora_Gateway/.secrets/session_tokens.txt\tfalse\n\n",
                 "/new-api\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
                 "/data\t/vol1/1000/Solis_Aurora_Gateway/data/new-api\ttrue\n\n",
                 "/mihomo\trunning\t0\taurora-stack\t/vol1/1000/Solis_Aurora_Gateway\n",
@@ -345,7 +375,8 @@ class DockerCheckTests(unittest.TestCase):
 
         snapshots = MODULE.collect_container_snapshots(fake_run)
 
-        self.assertEqual(snapshots["aurora"].mounts, ())
+        self.assertEqual(len(snapshots["aurora"].mounts), 1)
+        self.assertFalse(snapshots["aurora"].mounts[0].read_write)
         self.assertEqual(len(snapshots["new-api"].mounts), 1)
         self.assertEqual(len(snapshots["mihomo"].mounts), 1)
         self.assertEqual(snapshots["metacubexd"].mounts, ())
@@ -476,7 +507,7 @@ def make_token(exp: int) -> str:
 
 
 class DatabaseCheckTests(unittest.TestCase):
-    def test_database_pass_warn_and_fail_boundaries(self):
+    def test_database_requires_final_service_key_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             database = root / "data" / "new-api" / "one-api.db"
@@ -488,16 +519,15 @@ class DatabaseCheckTests(unittest.TestCase):
                 )
                 connection.execute(
                     "INSERT INTO channels VALUES (1, 1, ?, ?)",
-                    (make_token(500000), "http://aurora:8080"),
+                    ("service-key-value", "http://aurora:8080"),
                 )
                 connection.commit()
             finally:
                 connection.close()
-            self.assertEqual(MODULE.check_database(root, 1, 100000).status, "PASS")
-            self.assertEqual(
-                MODULE.check_database(root, 1, 496500).code, "token_near_expiry"
+            (root / ".env").write_text(
+                "AURORA_AUTHORIZATION=service-key-value\n", encoding="utf-8"
             )
-            self.assertEqual(MODULE.check_database(root, 1, 500000).status, "FAIL")
+            self.assertEqual(MODULE.check_database(root, 1, 100000).status, "PASS")
 
     def test_service_key_channel_passes_with_only_sanitized_booleans(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -513,14 +543,14 @@ class DatabaseCheckTests(unittest.TestCase):
                     "INSERT INTO channels VALUES (1, 1, ?, ?)",
                     (
                         "service-key-value",
-                        "http://aurora-session-renewal-canary:8080",
+                        "http://aurora:8080",
                     ),
                 )
                 connection.commit()
             finally:
                 connection.close()
-            (root / ".env.canary").write_text(
-                "AURORA_CANARY_AUTHORIZATION=service-key-value\n",
+            (root / ".env").write_text(
+                "AURORA_AUTHORIZATION=service-key-value\n",
                 encoding="utf-8",
             )
 
@@ -555,14 +585,14 @@ class DatabaseCheckTests(unittest.TestCase):
                     "INSERT INTO channels VALUES (1, 1, ?, ?)",
                     (
                         "database-service-key",
-                        "http://aurora-session-renewal-canary:8080",
+                        "http://aurora:8080",
                     ),
                 )
                 connection.commit()
             finally:
                 connection.close()
-            (root / ".env.canary").write_text(
-                "AURORA_CANARY_AUTHORIZATION=different-service-key\n",
+            (root / ".env").write_text(
+                "AURORA_AUTHORIZATION=different-service-key\n",
                 encoding="utf-8",
             )
 
@@ -588,85 +618,17 @@ class DatabaseCheckTests(unittest.TestCase):
         self.assertEqual((result.status, result.code), ("FAIL", "database_invalid"))
         self.assertEqual(
             set(result.details),
-            {"integrity_ok", "remaining_seconds", "expires_at"},
+            {
+                "integrity_ok",
+                "channel_active",
+                "channel_base_matches",
+                "service_key_matches",
+            },
         )
 
 
-class RefreshStateTests(unittest.TestCase):
-    def test_held_lock_fails_before_log_read(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = MODULE.check_refresh_state(
-                Path(directory),
-                datetime(2026, 8, 1, 9, 12, tzinfo=timezone.utc),
-                lambda path: True,
-            )
-        self.assertEqual((result.status, result.code), ("FAIL", "refresh_in_progress_overrun"))
-
-    def test_recent_success_passes_and_raw_reason_is_ignored(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            log = root / ".secrets" / "token-refresh.log"
-            log.parent.mkdir(parents=True)
-            log.write_text(
-                '{"time":"2026-08-01T09:17:00Z","event":"refresh_skipped","reason":"raw-private-text"}\n',
-                encoding="utf-8",
-            )
-            result = MODULE.check_refresh_state(
-                root,
-                datetime(2026, 8, 1, 9, 20, tzinfo=timezone.utc),
-                lambda path: False,
-            )
-        self.assertEqual((result.status, result.code), ("PASS", "refresh_recent"))
-        self.assertNotIn("raw-private-text", json.dumps(result.details))
-
-    def test_partial_invalid_log_warns_and_failed_event_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            log = root / ".secrets" / "token-refresh.log"
-            log.parent.mkdir(parents=True)
-            log.write_text(
-                'not-json\n{"time":"2026-08-01T09:17:00Z","event":"refresh_failed"}\n',
-                encoding="utf-8",
-            )
-            result = MODULE.check_refresh_state(
-                root,
-                datetime(2026, 8, 1, 9, 20, tzinfo=timezone.utc),
-                lambda path: False,
-            )
-        self.assertEqual((result.status, result.code), ("FAIL", "refresh_failed"))
-        self.assertEqual(result.details["invalid_records"], 1)
-
-    def test_missing_stale_future_and_oversized_are_bounded(self):
-        now = datetime(2026, 8, 1, 23, 0, tzinfo=timezone.utc)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            missing = MODULE.check_refresh_state(root, now, lambda path: False)
-            self.assertEqual(missing.code, "refresh_missing")
-            log = root / ".secrets" / "token-refresh.log"
-            log.parent.mkdir(parents=True)
-            log.write_text(
-                '{"time":"2026-08-01T09:00:00Z","event":"refresh_succeeded"}\n',
-                encoding="utf-8",
-            )
-            self.assertEqual(
-                MODULE.check_refresh_state(root, now, lambda path: False).code,
-                "refresh_stale",
-            )
-            log.write_text(
-                '{"time":"2026-08-02T00:00:01Z","event":"refresh_succeeded"}\n',
-                encoding="utf-8",
-            )
-            self.assertEqual(
-                MODULE.check_refresh_state(root, now, lambda path: False).code,
-                "refresh_malformed",
-            )
-            log.write_bytes(b"x" * (1024 * 1024 + 1))
-            oversized = MODULE.check_refresh_state(root, now, lambda path: False)
-            self.assertEqual((oversized.status, oversized.code), ("WARN", "refresh_malformed"))
-
-
 class CollectionTests(unittest.TestCase):
-    def test_service_key_mode_does_not_consume_legacy_refresh_log(self):
+    def test_service_key_mode_publishes_internal_renewal_status(self):
         database_result = MODULE.CheckResult(
             "PASS",
             "database_and_service_key_valid",
@@ -682,21 +644,16 @@ class CollectionTests(unittest.TestCase):
             raise RuntimeError("sanitized")
 
         now = datetime(2026, 8, 4, 6, 10, 25, tzinfo=timezone.utc)
-        with (
-            mock.patch.object(
-                MODULE, "check_database", return_value=database_result
-            ),
-            mock.patch.object(MODULE, "check_refresh_state") as refresh,
+        with mock.patch.object(
+            MODULE, "check_database", return_value=database_result
         ):
             results = MODULE.collect_results(
                 Path("/candidate"),
                 1,
                 now,
                 run=broken_run,
-                lock_probe=lambda path: False,
             )
 
-        refresh.assert_not_called()
         self.assertEqual(
             results["refresh_log"],
             MODULE.CheckResult(
@@ -714,37 +671,26 @@ class CollectionTests(unittest.TestCase):
     def test_adapter_failures_are_sanitized_and_other_checks_continue(self):
         database_result = MODULE.CheckResult(
             "PASS",
-            "database_and_token_valid",
+            "database_and_service_key_valid",
             {
                 "integrity_ok": True,
-                "remaining_seconds": 400000,
-                "expires_at": "2026-08-06T00:00:00Z",
-            },
-        )
-        refresh_result = MODULE.CheckResult(
-            "PASS",
-            "refresh_recent",
-            {
-                "event": "refresh_skipped",
-                "valid_records": 1,
-                "invalid_records": 0,
-                "event_at": "2026-08-01T09:00:00Z",
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": True,
             },
         )
 
         def broken_run(args, timeout=20):
             raise RuntimeError("raw-private-command-error")
 
-        with (
-            mock.patch.object(MODULE, "check_database", return_value=database_result) as database,
-            mock.patch.object(MODULE, "check_refresh_state", return_value=refresh_result) as refresh,
-        ):
+        with mock.patch.object(
+            MODULE, "check_database", return_value=database_result
+        ) as database:
             results = MODULE.collect_results(
                 Path("/candidate"),
                 1,
                 datetime(2026, 8, 1, 9, 12, tzinfo=timezone.utc),
                 run=broken_run,
-                lock_probe=lambda path: False,
             )
         self.assertEqual(tuple(results), MODULE.EXPECTED_CHECKS)
         self.assertEqual(results["containers"].code, "container_inspect_failed")
@@ -752,7 +698,6 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(results["local_tcp"].code, "tcp_target_unavailable")
         self.assertNotIn("raw-private", json.dumps({k: vars(v) for k, v in results.items()}))
         database.assert_called_once()
-        refresh.assert_called_once()
 
 
 class AtomicWriteTests(unittest.TestCase):
@@ -798,19 +743,20 @@ class AtomicWriteTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_pass_warn_fail_exit_codes_publish_once(self):
-        cases = (("PASS", 0), ("WARN", 0), ("FAIL", 1))
+    def test_pass_and_fail_exit_codes_publish_once(self):
+        cases = (("PASS", 0), ("FAIL", 1))
         for status_value, expected_code in cases:
             with self.subTest(status=status_value), tempfile.TemporaryDirectory() as directory:
                 results = make_results()
                 if status_value != "PASS":
                     results["database"] = MODULE.CheckResult(
                         status_value,
-                        "token_near_expiry" if status_value == "WARN" else "token_expired",
+                        "database_invalid",
                         {
                             "integrity_ok": True,
-                            "remaining_seconds": 1 if status_value == "WARN" else 0,
-                            "expires_at": "2026-08-01T09:12:01Z",
+                            "channel_active": True,
+                            "channel_base_matches": True,
+                            "service_key_matches": False,
                         },
                     )
                 stdout = io.StringIO()

@@ -1,4 +1,3 @@
-import base64
 import http.client
 import importlib.util
 import json
@@ -213,14 +212,6 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(result.details["error"], "docker_inspect_error")
 
 
-def make_token(exp: int, marker: str) -> str:
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"exp": exp, "marker": marker}).encode()
-    ).decode().rstrip("=")
-    return f"{header}.{payload}.signature-{marker}"
-
-
 class DatabaseTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -229,14 +220,14 @@ class DatabaseTests(unittest.TestCase):
         db_dir.mkdir(parents=True)
         self.database = db_dir / "one-api.db"
         self.now = 1_700_000_000
-        self.channel_token = make_token(
-            self.now + 7 * 24 * 3600,
-            "channel",
+        self.channel_key = "aurora-service-key"
+        (self.root / ".env").write_text(
+            f"AURORA_AUTHORIZATION={self.channel_key}\n", encoding="utf-8"
         )
         with sqlite3.connect(self.database) as database:
             database.execute(
                 "CREATE TABLE channels "
-                "(id INTEGER PRIMARY KEY, key TEXT, status INTEGER)"
+                "(id INTEGER PRIMARY KEY, key TEXT, status INTEGER, base_url TEXT)"
             )
             database.execute(
                 "CREATE TABLE tokens "
@@ -245,13 +236,14 @@ class DatabaseTests(unittest.TestCase):
                 "remain_quota INTEGER)"
             )
             database.execute(
-                "INSERT INTO channels VALUES (1, ?, 1)",
-                (self.channel_token,),
+                "INSERT INTO channels VALUES (1, ?, 1, ?)",
+                (self.channel_key, "http://aurora:8080"),
             )
             database.execute(
                 "INSERT INTO tokens VALUES (1, ?, 1, -1, 1, 0)",
                 ("client-token-value",),
             )
+        database.close()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -264,31 +256,31 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "PASS")
         self.assertEqual(client_token, "sk-client-token-value")
-        self.assertIn(self.channel_token, secrets)
+        self.assertIn(self.channel_key, secrets)
         self.assertIn("client-token-value", secrets)
         self.assertIn("sk-client-token-value", secrets)
         serialized = json.dumps(result.details)
-        self.assertNotIn(self.channel_token, serialized)
+        self.assertNotIn(self.channel_key, serialized)
         self.assertNotIn("client-token-value", serialized)
         self.assertNotIn("sk-client-token-value", serialized)
 
-    def test_token_inside_threshold_warns(self):
-        near = make_token(self.now + 48 * 3600, "near")
+    def test_wrong_service_key_fails(self):
         with sqlite3.connect(self.database) as database:
             database.execute(
                 "UPDATE channels SET key = ? WHERE id = 1",
-                (near,),
+                ("different-service-key",),
             )
+        database.close()
         result, _, _ = MODULE.check_database(self.root, 1, self.now)
-        self.assertEqual(result.status, "WARN")
+        self.assertEqual(result.status, "FAIL")
 
-    def test_expired_token_fails(self):
-        expired = make_token(self.now - 1, "expired")
+    def test_wrong_base_url_fails(self):
         with sqlite3.connect(self.database) as database:
             database.execute(
-                "UPDATE channels SET key = ? WHERE id = 1",
-                (expired,),
+                "UPDATE channels SET base_url = ? WHERE id = 1",
+                ("http://legacy:8080",),
             )
+        database.close()
         result, _, _ = MODULE.check_database(self.root, 1, self.now)
         self.assertEqual(result.status, "FAIL")
 
@@ -298,6 +290,7 @@ class DatabaseTests(unittest.TestCase):
                 "UPDATE tokens SET key = ? WHERE id = 1",
                 (value,),
             )
+        database.close()
         result, client_token, secrets = MODULE.check_database(
             self.root,
             1,
@@ -305,7 +298,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FAIL")
         self.assertIsNone(client_token)
-        self.assertEqual(secrets, (self.channel_token,))
+        self.assertEqual(secrets, (self.channel_key,))
         serialized = json.dumps(
             {"summary": result.summary, "details": result.details}
         )
@@ -331,6 +324,9 @@ class DatabaseTests(unittest.TestCase):
             def __exit__(self, *args):
                 real_database.close()
 
+            def close(self):
+                real_database.close()
+
             def execute(self, statement, parameters=()):
                 if statement == "PRAGMA integrity_check":
                     cursor = mock.Mock()
@@ -351,7 +347,7 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(result.status, "FAIL")
         self.assertIsNone(client_token)
-        self.assertEqual(secrets, ())
+        self.assertEqual(secrets, (self.channel_key,))
         self.assertEqual(
             result.details,
             {"error": "database_state_invalid"},
@@ -359,134 +355,14 @@ class DatabaseTests(unittest.TestCase):
 
 
 class RefreshLogTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        (self.root / ".secrets").mkdir()
-        self.log = self.root / ".secrets" / "token-refresh.log"
+    def test_external_refresh_log_is_not_applicable(self):
+        result = MODULE.check_refresh_log(Path("/not-read"))
 
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def test_missing_log_warns(self):
-        result = MODULE.check_refresh_log(self.root)
-        self.assertEqual(result.status, "WARN")
-
-    def test_log_stat_race_returns_fixed_failure(self):
-        with (
-            mock.patch.object(MODULE.Path, "exists", return_value=True),
-            mock.patch.object(
-                MODULE.Path,
-                "stat",
-                side_effect=PermissionError("sensitive filesystem detail"),
-            ),
-        ):
-            result = MODULE.check_refresh_log(self.root)
-        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.status, "PASS")
         self.assertEqual(
             result.details,
-            {"error": "refresh_log_read_failed"},
+            {"mode": "aurora_internal", "external_refresh": "not_applicable"},
         )
-        self.assertNotIn("sensitive filesystem detail", result.summary)
-
-    def test_latest_successful_event_passes(self):
-        self.log.write_text(
-            json.dumps(
-                {
-                    "time": "2026-07-29T04:17:01+0800",
-                    "event": "refresh_skipped",
-                    "remaining_seconds": 681883,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = MODULE.check_refresh_log(self.root)
-        self.assertEqual(result.status, "PASS")
-        self.assertEqual(result.details["event"], "refresh_skipped")
-
-    def test_invalid_line_warns_when_valid_event_exists(self):
-        self.log.write_text(
-            "not-json\n"
-            + json.dumps(
-                {
-                    "time": "2026-07-29T04:17:01+0800",
-                    "event": "refresh_skipped",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = MODULE.check_refresh_log(self.root)
-        self.assertEqual(result.status, "WARN")
-
-    def test_json_scalar_or_array_warns_when_valid_event_exists(self):
-        self.log.write_text(
-            '"scalar"\n'
-            + "[]\n"
-            + json.dumps(
-                {
-                    "time": "2026-07-29T04:17:01+0800",
-                    "event": "refresh_skipped",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = MODULE.check_refresh_log(self.root)
-        self.assertEqual(result.status, "WARN")
-        self.assertEqual(result.details["invalid_lines"], 2)
-
-    def test_unknown_and_untrusted_log_values_are_not_echoed(self):
-        secret = "known-secret"
-        unknown_event = "internal_failure"
-        invalid_time = "not-a-timestamp"
-        string_number = "123"
-        self.log.write_text(
-            json.dumps(
-                {
-                    "time": invalid_time,
-                    "event": unknown_event,
-                    "reason": f"request failed {secret}",
-                    "remaining_seconds": string_number,
-                    "channel_id": True,
-                    "previous_exp": string_number,
-                    "new_exp": True,
-                    "extension_seconds": string_number,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = MODULE.check_refresh_log(self.root, (secret,))
-        serialized = json.dumps(
-            {"summary": result.summary, "details": result.details}
-        )
-        self.assertEqual(result.status, "FAIL")
-        self.assertEqual(result.summary, "未知续期事件")
-        self.assertEqual(result.details["event"], "unknown")
-        self.assertNotIn(secret, serialized)
-        self.assertNotIn(unknown_event, serialized)
-        self.assertNotIn(invalid_time, serialized)
-        self.assertNotIn(string_number, serialized)
-        self.assertNotIn("reason", result.details)
-
-    def test_refresh_failed_fails_and_redacts_secret(self):
-        secret = "known-secret"
-        self.log.write_text(
-            json.dumps(
-                {
-                    "time": "2026-07-29T04:17:01+0800",
-                    "event": "refresh_failed",
-                    "reason": f"request failed {secret}",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = MODULE.check_refresh_log(self.root, (secret,))
-        self.assertEqual(result.status, "FAIL")
-        self.assertNotIn(secret, json.dumps(result.details))
 
 
 class MihomoTests(unittest.TestCase):
@@ -731,7 +607,7 @@ class StrictHttpTests(unittest.TestCase):
             ).encode(),
         )
         with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
-            with self.assertRaises(MODULE.token_refresh.RefreshError):
+            with self.assertRaises(MODULE.HealthError):
                 MODULE.request_json_200(
                     "http://127.0.0.1:3000/v1/chat/completions",
                     "client-secret",
@@ -751,7 +627,7 @@ class StrictHttpTests(unittest.TestCase):
     def test_request_json_200_rejects_non_object_json(self):
         urlopen = self.make_urlopen(200, b"[]")
         with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
-            with self.assertRaises(MODULE.token_refresh.RefreshError):
+            with self.assertRaises(MODULE.HealthError):
                 MODULE.request_json_200(
                     "http://127.0.0.1:3000/v1/models",
                     "client-secret",
@@ -768,7 +644,7 @@ class StrictHttpTests(unittest.TestCase):
         urlopen = mock.MagicMock()
         urlopen.return_value.__enter__.return_value = response
         with mock.patch.object(MODULE.urllib.request, "urlopen", urlopen):
-            with self.assertRaises(MODULE.token_refresh.RefreshError) as error:
+            with self.assertRaises(MODULE.HealthError) as error:
                 MODULE.request_json_200(
                     "http://127.0.0.1:3000/v1/models",
                     "client-secret",
@@ -913,7 +789,7 @@ class ChatTests(unittest.TestCase):
     def test_thinking_fallback_warns(self):
         request = mock.Mock(
             side_effect=[
-                MODULE.token_refresh.RefreshError("pro failed"),
+                MODULE.HealthError("pro failed"),
                 {
                     "choices": [
                         {
@@ -931,7 +807,7 @@ class ChatTests(unittest.TestCase):
     def test_both_models_fail_without_leaking_token(self):
         secret = "client-secret"
         request = mock.Mock(
-            side_effect=MODULE.token_refresh.RefreshError(
+            side_effect=MODULE.HealthError(
                 f"request failed {secret}"
             )
         )
@@ -1063,7 +939,9 @@ class CliTests(unittest.TestCase):
             mock.patch.object(MODULE, "check_models", models),
             mock.patch.object(MODULE, "check_chat", chat),
         ):
-            report = MODULE.run_health_check(Path("/example"), 1, now=1)
+            report = MODULE.run_health_check(
+                Path("/example"), 1, now=1_700_000_000
+            )
 
         models.assert_not_called()
         chat.assert_not_called()
@@ -1131,7 +1009,7 @@ class CliTests(unittest.TestCase):
             mock.patch.object(MODULE, "check_models", models),
             mock.patch.object(MODULE, "check_chat", chat),
         ):
-            MODULE.run_health_check(Path("/example"), 1, now=1)
+            MODULE.run_health_check(Path("/example"), 1, now=1_700_000_000)
 
         models.assert_called_once_with("client-secret")
         chat.assert_called_once_with("client-secret")

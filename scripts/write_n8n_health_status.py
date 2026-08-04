@@ -3,8 +3,7 @@
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
-import base64
+from datetime import datetime, timezone
 import hmac
 import ipaddress
 import json
@@ -17,28 +16,6 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Sequence
-
-from aurora_session_renewal_probe import read_env_value
-
-try:
-    from refresh_chatgpt_access_token import RefreshError, jwt_exp
-except ModuleNotFoundError as import_error:
-    if import_error.name != "fcntl":
-        raise
-
-    class RefreshError(RuntimeError):
-        """Safe token parsing failure for non-POSIX local verification."""
-
-    def jwt_exp(token: str) -> int:
-        """Parse a JWT exp claim when the POSIX refresh module cannot load."""
-        try:
-            encoded = token.split(".")[1]
-            encoded += "=" * (-len(encoded) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(encoded))
-            return int(payload["exp"])
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RefreshError("invalid JWT expiry") from exc
-
 
 STATUS_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
 EXPECTED_CHECKS = (
@@ -65,21 +42,11 @@ ALLOWED_CODES = {
         "tcp_target_unavailable",
     },
     "database": {
-        "database_and_token_valid",
         "database_and_service_key_valid",
-        "token_near_expiry",
-        "token_expired",
         "database_invalid",
     },
     "refresh_log": {
-        "refresh_recent",
         "refresh_not_applicable",
-        "refresh_missing",
-        "refresh_stale",
-        "refresh_malformed",
-        "refresh_failed",
-        "refresh_in_progress_overrun",
-        "refresh_lock_unavailable",
     },
 }
 EXPECTED_STATUS_BY_CODE = {
@@ -92,26 +59,16 @@ EXPECTED_STATUS_BY_CODE = {
     "local_ports_reachable": "PASS",
     "local_port_unreachable": "FAIL",
     "tcp_target_unavailable": "FAIL",
-    "database_and_token_valid": "PASS",
     "database_and_service_key_valid": "PASS",
-    "token_near_expiry": "WARN",
-    "token_expired": "FAIL",
     "database_invalid": "FAIL",
-    "refresh_recent": "PASS",
     "refresh_not_applicable": "PASS",
-    "refresh_missing": "WARN",
-    "refresh_stale": "WARN",
-    "refresh_malformed": "WARN",
-    "refresh_failed": "FAIL",
-    "refresh_in_progress_overrun": "FAIL",
-    "refresh_lock_unavailable": "FAIL",
 }
 SCHEMA_VERSION = 1
 PRODUCER = "Solis_Aurora_Gateway"
 MAX_STATUS_BYTES = 16 * 1024
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
 EXPECTED_ROOT = "/vol1/1000/Solis_Aurora_Gateway"
-SESSION_CANARY_BASE_URL = "http://aurora-session-renewal-canary:8080"
+FINAL_AURORA_BASE_URL = "http://aurora:8080"
 SERVICE_KEY_DETAIL_KEYS = frozenset(
     {
         "integrity_ok",
@@ -123,7 +80,35 @@ SERVICE_KEY_DETAIL_KEYS = frozenset(
 
 CommandRunner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 TcpConnector = Callable[[tuple[str, int], float], object]
-LockProbe = Callable[[Path], bool]
+
+
+def read_env_value(path: Path, key: str) -> str:
+    """Read exactly one strict, unquoted KEY=value entry."""
+    prefix = f"{key}="
+    values = []
+    invalid_target_entry = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith(prefix):
+            values.append(line[len(prefix) :])
+        elif key in stripped:
+            invalid_target_entry = True
+    if invalid_target_entry or len(values) != 1:
+        raise ValueError(f"expected exactly one non-empty {key} entry")
+    value = values[0]
+    if (
+        not value
+        or any(character.isspace() for character in value)
+        or "\x00" in value
+        or "#" in value
+        or "$" in value
+        or "'" in value
+        or '"' in value
+    ):
+        raise ValueError(f"expected exactly one non-empty {key} entry")
+    return value
 
 
 @dataclass(frozen=True)
@@ -238,17 +223,7 @@ def _validate_details(
                 and not all(details.values())
             )
         else:
-            if set(details) != {
-                "integrity_ok",
-                "remaining_seconds",
-                "expires_at",
-            }:
-                raise ValueError("invalid check details")
-            valid = (
-                type(details["integrity_ok"]) is bool
-                and type(details["remaining_seconds"]) is int
-                and _valid_utc_text(details["expires_at"])
-            )
+            raise ValueError("invalid check details")
     elif name == "refresh_log":
         if set(details) != {
             "event",
@@ -257,32 +232,13 @@ def _validate_details(
             "event_at",
         }:
             raise ValueError("invalid check details")
-        if code == "refresh_not_applicable":
-            valid = (
-                details["event"] == "not_applicable"
-                and details["valid_records"] == 0
-                and details["invalid_records"] == 0
-                and _valid_utc_text(details["event_at"])
-            )
-        else:
-            valid = (
-                details["event"]
-                in {
-                    "refresh_skipped",
-                    "refresh_succeeded",
-                    "refresh_failed",
-                    "refresh_in_progress",
-                    "missing",
-                    "lock_unavailable",
-                    "invalid_file",
-                    "oversized",
-                    "unreadable",
-                    "invalid_time",
-                }
-                and _valid_nonnegative_integer(details["valid_records"])
-                and _valid_nonnegative_integer(details["invalid_records"])
-                and _valid_utc_text(details["event_at"])
-            )
+        valid = (
+            code == "refresh_not_applicable"
+            and details["event"] == "not_applicable"
+            and details["valid_records"] == 0
+            and details["invalid_records"] == 0
+            and _valid_utc_text(details["event_at"])
+        )
     else:
         valid = False
     if not valid:
@@ -358,6 +314,12 @@ def check_runtime_contract(
     working_dir_matches = complete and all(
         snapshots[name].working_dir == EXPECTED_ROOT for name in EXPECTED_CONTAINERS
     )
+    aurora_mounts = {
+        (mount.destination, mount.source, mount.read_write)
+        for mount in snapshots.get(
+            "aurora", ContainerSnapshot("aurora", "", 0, "", "", ())
+        ).mounts
+    }
     new_api_mounts = {
         (mount.destination, mount.source, mount.read_write)
         for mount in snapshots.get(
@@ -370,8 +332,19 @@ def check_runtime_contract(
             "mihomo", ContainerSnapshot("mihomo", "", 0, "", "", ())
         ).mounts
     }
+    dashboard_mounts = snapshots.get(
+        "metacubexd", ContainerSnapshot("metacubexd", "", 0, "", "", ())
+    ).mounts
     mounts_match = (
-        new_api_mounts
+        aurora_mounts
+        == {
+            (
+                "/home/nonroot/session_tokens.txt",
+                f"{EXPECTED_ROOT}/.secrets/session_tokens.txt",
+                False,
+            )
+        }
+        and new_api_mounts
         == {("/data", f"{EXPECTED_ROOT}/data/new-api", True)}
         and mihomo_mounts
         == {(
@@ -379,6 +352,7 @@ def check_runtime_contract(
             f"{EXPECTED_ROOT}/data/mihomo",
             True,
         )}
+        and dashboard_mounts == ()
     )
     healthy = project_matches and working_dir_matches and mounts_match
     return CheckResult(
@@ -573,15 +547,6 @@ def check_local_tcp(
     )
 
 
-def _epoch_utc_text(epoch: int) -> str:
-    return (
-        datetime.fromtimestamp(epoch, timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
-
-
 def check_database(root: Path, channel_id: int, now_epoch: int) -> CheckResult:
     integrity_ok = False
     try:
@@ -603,222 +568,56 @@ def check_database(root: Path, channel_id: int, now_epoch: int) -> CheckResult:
             active = channel[0] == 1
             channel_key = channel[1]
             channel_base = channel[2]
-            expected_service_key = None
-            try:
-                expected_service_key = read_env_value(
-                    root / ".env.canary", "AURORA_CANARY_AUTHORIZATION"
-                )
-            except (OSError, ValueError):
-                pass
+            expected_service_key = read_env_value(
+                root / ".env", "AURORA_AUTHORIZATION"
+            )
             service_key_matches = (
                 isinstance(channel_key, str)
                 and isinstance(expected_service_key, str)
                 and hmac.compare_digest(channel_key, expected_service_key)
             )
-            service_mode = (
-                channel_base == SESSION_CANARY_BASE_URL or service_key_matches
+            details = {
+                "integrity_ok": integrity_ok,
+                "channel_active": active,
+                "channel_base_matches": channel_base == FINAL_AURORA_BASE_URL,
+                "service_key_matches": service_key_matches,
+            }
+            healthy = all(details.values())
+            return CheckResult(
+                "PASS" if healthy else "FAIL",
+                "database_and_service_key_valid" if healthy else "database_invalid",
+                details,
             )
-            if service_mode:
-                details = {
-                    "integrity_ok": integrity_ok,
-                    "channel_active": active,
-                    "channel_base_matches": channel_base == SESSION_CANARY_BASE_URL,
-                    "service_key_matches": service_key_matches,
-                }
-                healthy = all(details.values())
-                return CheckResult(
-                    "PASS" if healthy else "FAIL",
-                    "database_and_service_key_valid" if healthy else "database_invalid",
-                    details,
-                )
-        if (
-            not integrity_ok
-            or channel is None
-            or channel[0] != 1
-            or not isinstance(channel[1], str)
-        ):
-            raise ValueError("database state invalid")
-        expires_epoch = jwt_exp(channel[1])
-        remaining = expires_epoch - now_epoch
-        details = {
-            "integrity_ok": True,
-            "remaining_seconds": remaining,
-            "expires_at": _epoch_utc_text(expires_epoch),
-        }
-        if remaining <= 0:
-            return CheckResult("FAIL", "token_expired", details)
-        if remaining <= 72 * 3600:
-            return CheckResult("WARN", "token_near_expiry", details)
-        return CheckResult("PASS", "database_and_token_valid", details)
+        raise ValueError("database state invalid")
     except (
         OSError,
         OverflowError,
         sqlite3.Error,
         TypeError,
         ValueError,
-        RefreshError,
     ):
         return CheckResult(
             "FAIL",
             "database_invalid",
             {
                 "integrity_ok": integrity_ok,
-                "remaining_seconds": 0,
-                "expires_at": "1970-01-01T00:00:00Z",
+                "channel_active": False,
+                "channel_base_matches": False,
+                "service_key_matches": False,
             },
         )
 
 
-REFRESH_EVENTS = {"refresh_skipped", "refresh_succeeded", "refresh_failed"}
-MAX_REFRESH_LOG_BYTES = 1024 * 1024
-EMPTY_REFRESH_DETAILS = {
-    "event": "missing",
-    "valid_records": 0,
-    "invalid_records": 0,
-    "event_at": "1970-01-01T00:00:00Z",
-}
-
-
-def refresh_lock_is_held(root: Path) -> bool:
-    try:
-        import fcntl
-
-        path = root / ".secrets" / "refresh_chatgpt_access_token.lock"
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            return False
-        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError("refresh_lock_unavailable")
-        with path.open("r", encoding="utf-8") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(lock, fcntl.LOCK_UN)
-        return False
-    except (ImportError, OSError) as exc:
-        raise RuntimeError("refresh_lock_unavailable") from exc
-
-
-def _parse_refresh_time(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError("invalid refresh time")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("invalid refresh time")
-    return parsed.astimezone(timezone.utc)
-
-
-def _refresh_result(
-    status_value: str,
-    code: str,
-    event: str,
-    valid_records: int = 0,
-    invalid_records: int = 0,
-    event_at: str = "1970-01-01T00:00:00Z",
-) -> CheckResult:
+def _refresh_not_applicable(now: datetime) -> CheckResult:
     return CheckResult(
-        status_value,
-        code,
+        "PASS",
+        "refresh_not_applicable",
         {
-            "event": event,
-            "valid_records": valid_records,
-            "invalid_records": invalid_records,
-            "event_at": event_at,
+            "event": "not_applicable",
+            "valid_records": 0,
+            "invalid_records": 0,
+            "event_at": _utc_text(now.astimezone(timezone.utc)),
         },
-    )
-
-
-def check_refresh_state(
-    root: Path,
-    now: datetime,
-    lock_probe: LockProbe = refresh_lock_is_held,
-) -> CheckResult:
-    if now.tzinfo is None:
-        return _refresh_result("WARN", "refresh_malformed", "invalid_time", 0, 1)
-    now_utc = now.astimezone(timezone.utc)
-    try:
-        if lock_probe(root):
-            return _refresh_result(
-                "FAIL", "refresh_in_progress_overrun", "refresh_in_progress"
-            )
-    except RuntimeError:
-        return _refresh_result(
-            "FAIL", "refresh_lock_unavailable", "lock_unavailable"
-        )
-
-    path = root / ".secrets" / "token-refresh.log"
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return CheckResult("WARN", "refresh_missing", dict(EMPTY_REFRESH_DETAILS))
-    except OSError:
-        return _refresh_result("WARN", "refresh_malformed", "invalid_file", 0, 1)
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-        return _refresh_result("WARN", "refresh_malformed", "invalid_file", 0, 1)
-    if metadata.st_size > MAX_REFRESH_LOG_BYTES:
-        return _refresh_result("WARN", "refresh_malformed", "oversized", 0, 1)
-    try:
-        with path.open("rb") as stream:
-            raw = stream.read(MAX_REFRESH_LOG_BYTES + 1)
-    except OSError:
-        return _refresh_result("WARN", "refresh_malformed", "unreadable", 0, 1)
-    if len(raw) > MAX_REFRESH_LOG_BYTES:
-        return _refresh_result("WARN", "refresh_malformed", "oversized", 0, 1)
-
-    valid = []
-    invalid_records = 0
-    for line in raw.decode("utf-8", "replace").splitlines():
-        try:
-            item = json.loads(line)
-            if not isinstance(item, dict):
-                raise ValueError("invalid refresh record")
-            event = item.get("event")
-            event_at = _parse_refresh_time(item.get("time"))
-            if event not in REFRESH_EVENTS or event_at > now_utc + timedelta(minutes=5):
-                raise ValueError("invalid refresh record")
-            valid.append((event_at, event))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            invalid_records += 1
-    if not valid:
-        if invalid_records:
-            return _refresh_result(
-                "WARN", "refresh_malformed", "missing", 0, invalid_records
-            )
-        return CheckResult("WARN", "refresh_missing", dict(EMPTY_REFRESH_DETAILS))
-
-    event_at, event = max(valid)
-    details_time = _utc_text(event_at)
-    if event == "refresh_failed":
-        return _refresh_result(
-            "FAIL",
-            "refresh_failed",
-            event,
-            len(valid),
-            invalid_records,
-            details_time,
-        )
-    if now_utc - event_at > timedelta(hours=13):
-        return _refresh_result(
-            "WARN",
-            "refresh_stale",
-            event,
-            len(valid),
-            invalid_records,
-            details_time,
-        )
-    if invalid_records:
-        return _refresh_result(
-            "WARN",
-            "refresh_malformed",
-            event,
-            len(valid),
-            invalid_records,
-            details_time,
-        )
-    return _refresh_result(
-        "PASS", "refresh_recent", event, len(valid), 0, details_time
     )
 
 
@@ -828,7 +627,6 @@ def collect_results(
     now: datetime,
     run: CommandRunner = run_command,
     connect: TcpConnector = socket.create_connection,
-    lock_probe: LockProbe = refresh_lock_is_held,
 ) -> dict[str, CheckResult]:
     results = {}
     try:
@@ -876,20 +674,7 @@ def collect_results(
                 "expires_at": "1970-01-01T00:00:00Z",
             },
         )
-    if set(results["database"].details) == SERVICE_KEY_DETAIL_KEYS:
-        results["refresh_log"] = _refresh_result(
-            "PASS",
-            "refresh_not_applicable",
-            "not_applicable",
-            event_at=_utc_text(now.astimezone(timezone.utc)),
-        )
-    else:
-        try:
-            results["refresh_log"] = check_refresh_state(root, now, lock_probe)
-        except (OSError, RuntimeError, TypeError, ValueError):
-            results["refresh_log"] = _refresh_result(
-                "FAIL", "refresh_lock_unavailable", "lock_unavailable"
-            )
+    results["refresh_log"] = _refresh_not_applicable(now)
     return results
 
 

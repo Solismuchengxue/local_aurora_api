@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import hmac
 import http.client
 import json
 from pathlib import Path
@@ -18,9 +19,6 @@ from typing import Callable
 import urllib.error
 import urllib.request
 
-import refresh_chatgpt_access_token as token_refresh
-
-
 STATUS_ORDER = {"PASS": 0, "WARN": 1, "FAIL": 2}
 STATUS_LABELS = {"PASS": "通过", "WARN": "警告", "FAIL": "失败"}
 CHECK_LABELS = {
@@ -32,20 +30,9 @@ CHECK_LABELS = {
     "chat": "聊天",
 }
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
-KNOWN_REFRESH_EVENTS = {
-    "refresh_skipped",
-    "refresh_succeeded",
-    "refresh_failed",
-}
-LOG_INTEGER_FIELDS = {
-    "remaining_seconds",
-    "channel_id",
-    "previous_exp",
-    "new_exp",
-    "extension_seconds",
-}
 EXPECTED_MODELS = {"gpt-5-6-pro", "gpt-5-6-thinking"}
 NEW_API_BASE = "http://127.0.0.1:3000"
+FINAL_AURORA_BASE_URL = "http://aurora:8080"
 CONTAINER_INSPECT_FORMAT = (
     "{{.Name}}\t{{.State.Status}}\t{{.RestartCount}}"
 )
@@ -60,6 +47,39 @@ CONTAINER_STATES = {
 }
 MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 MAX_MODEL_COUNT = 64
+
+
+class HealthError(RuntimeError):
+    """Sanitized health-check failure."""
+
+
+def read_env_value(path: Path, key: str) -> str:
+    """Read exactly one strict, unquoted KEY=value entry."""
+    prefix = f"{key}="
+    values = []
+    invalid_target_entry = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith(prefix):
+            values.append(line[len(prefix) :])
+        elif key in stripped:
+            invalid_target_entry = True
+    if invalid_target_entry or len(values) != 1:
+        raise ValueError(f"expected exactly one non-empty {key} entry")
+    value = values[0]
+    if (
+        not value
+        or any(character.isspace() for character in value)
+        or "\x00" in value
+        or "#" in value
+        or "$" in value
+        or "'" in value
+        or '"' in value
+    ):
+        raise ValueError(f"expected exactly one non-empty {key} entry")
+    return value
 
 
 @dataclass(frozen=True)
@@ -164,7 +184,7 @@ def request_json_200(
             status = response.status
             body = response.read(64 * 1024)
     except urllib.error.HTTPError as exc:
-        raise token_refresh.RefreshError(
+        raise HealthError(
             "health API request returned non-200 status"
         ) from exc
     except (
@@ -173,19 +193,19 @@ def request_json_200(
         urllib.error.URLError,
         http.client.HTTPException,
     ) as exc:
-        raise token_refresh.RefreshError("health API request failed") from exc
+        raise HealthError("health API request failed") from exc
     if status != 200:
-        raise token_refresh.RefreshError(
+        raise HealthError(
             "health API request returned non-200 status"
         )
     try:
         result = json.loads(body)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise token_refresh.RefreshError(
+        raise HealthError(
             "health API response was not valid JSON"
         ) from exc
     if not isinstance(result, dict):
-        raise token_refresh.RefreshError("health API response was not an object")
+        raise HealthError("health API response was not an object")
     return result
 
 
@@ -288,7 +308,7 @@ def check_models(
     except (
         AttributeError,
         TypeError,
-        token_refresh.RefreshError,
+        HealthError,
         http.client.HTTPException,
     ):
         return CheckResult(
@@ -395,7 +415,7 @@ def check_chat(
         except (
             AttributeError,
             TypeError,
-            token_refresh.RefreshError,
+            HealthError,
             http.client.HTTPException,
         ):
             failures += 1
@@ -499,18 +519,23 @@ def check_database(
     now: int,
 ) -> tuple[CheckResult, str | None, tuple[str, ...]]:
     path = root / "data" / "new-api" / "one-api.db"
-    channel_token = ""
+    channel_key = ""
+    expected_service_key = ""
     raw_client_token = ""
     client_token = ""
     try:
-        with sqlite3.connect(
+        expected_service_key = read_env_value(
+            root / ".env", "AURORA_AUTHORIZATION"
+        )
+        database = sqlite3.connect(
             f"file:{path.as_posix()}?mode=ro",
             uri=True,
             timeout=30,
-        ) as database:
+        )
+        try:
             integrity = database.execute("PRAGMA integrity_check").fetchone()
             channel = database.execute(
-                "SELECT key FROM channels WHERE id = ? AND status = 1",
+                "SELECT key, base_url FROM channels WHERE id = ? AND status = 1",
                 (channel_id,),
             ).fetchone()
             client = database.execute(
@@ -523,9 +548,16 @@ def check_database(
                 """,
                 (now,),
             ).fetchone()
+        finally:
+            database.close()
         if integrity != ("ok",) or channel is None or client is None:
             raise ValueError("required database state is unavailable")
-        channel_token = str(channel[0])
+        channel_key = str(channel[0])
+        channel_base = channel[1]
+        if not hmac.compare_digest(channel_key, expected_service_key):
+            raise ValueError("channel service key mismatch")
+        if channel_base != FINAL_AURORA_BASE_URL:
+            raise ValueError("channel base URL mismatch")
         stored_client_token = client[0]
         if (
             not isinstance(stored_client_token, str)
@@ -538,30 +570,15 @@ def check_database(
             if raw_client_token.startswith("sk-")
             else f"sk-{raw_client_token}"
         )
-        remaining = token_refresh.jwt_exp(channel_token) - now
-        status = (
-            "FAIL"
-            if remaining <= 0
-            else "WARN"
-            if remaining <= 72 * 3600
-            else "PASS"
-        )
-        summary = (
-            "渠道 Token 已过期"
-            if remaining <= 0
-            else f"数据库完整，Token 剩余 {remaining // 3600} 小时"
-        )
         return (
             CheckResult(
                 "database",
-                status,
-                summary,
+                "PASS",
+                "数据库完整，正式 Aurora 渠道与服务密钥一致",
                 {
                     "integrity": "ok",
-                    "remaining_seconds": remaining,
-                    "expires_at": datetime.fromtimestamp(
-                        now + remaining
-                    ).astimezone().isoformat(timespec="seconds"),
+                    "channel_base_matches": True,
+                    "service_key_matches": True,
                 },
             ),
             client_token,
@@ -569,7 +586,8 @@ def check_database(
                 dict.fromkeys(
                     value
                     for value in (
-                        channel_token,
+                        channel_key,
+                        expected_service_key,
                         raw_client_token,
                         client_token,
                     )
@@ -582,18 +600,24 @@ def check_database(
         sqlite3.Error,
         TypeError,
         ValueError,
-        token_refresh.RefreshError,
     ):
         secrets = tuple(
-            value
-            for value in (channel_token, raw_client_token, client_token)
-            if value
+            dict.fromkeys(
+                value
+                for value in (
+                    channel_key,
+                    expected_service_key,
+                    raw_client_token,
+                    client_token,
+                )
+                if value
+            )
         )
         return (
             CheckResult(
                 "database",
                 "FAIL",
-                "数据库、渠道 Token 或客户端令牌检查失败",
+                "数据库、正式 Aurora 渠道或客户端令牌检查失败",
                 {"error": "database_state_invalid"},
             ),
             None,
@@ -605,79 +629,11 @@ def check_refresh_log(
     root: Path,
     secrets: tuple[str, ...] = (),
 ) -> CheckResult:
-    path = root / ".secrets" / "token-refresh.log"
-    records = []
-    invalid_lines = 0
-    try:
-        if not path.exists() or path.stat().st_size == 0:
-            return CheckResult(
-                "refresh_log",
-                "WARN",
-                "续期日志尚不存在或为空",
-                {"event": None},
-            )
-        for line in path.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines():
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                invalid_lines += 1
-                continue
-            if not isinstance(raw, dict):
-                invalid_lines += 1
-                continue
-            event = raw.get("event")
-            record = {
-                "event": event
-                if isinstance(event, str) and event in KNOWN_REFRESH_EVENTS
-                else "unknown"
-            }
-            timestamp = raw.get("time")
-            if (
-                isinstance(timestamp, str)
-                and 0 < len(timestamp) <= 64
-                and "T" in timestamp
-            ):
-                try:
-                    if datetime.fromisoformat(timestamp).tzinfo is not None:
-                        record["time"] = timestamp
-                except ValueError:
-                    pass
-            for key in LOG_INTEGER_FIELDS:
-                value = raw.get(key)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    record[key] = value
-            records.append(record)
-    except OSError:
-        return CheckResult(
-            "refresh_log",
-            "FAIL",
-            "无法读取续期日志",
-            {"error": "refresh_log_read_failed"},
-        )
-    if not records:
-        return CheckResult(
-            "refresh_log",
-            "FAIL",
-            "续期日志中没有合法 JSON 事件",
-            {"invalid_lines": invalid_lines},
-        )
-    latest = records[-1]
-    event = latest["event"]
-    if event == "refresh_failed":
-        status = "FAIL"
-    elif event in {"refresh_skipped", "refresh_succeeded"}:
-        status = "WARN" if invalid_lines else "PASS"
-    else:
-        status = "FAIL"
-    summary = "未知续期事件" if event == "unknown" else f"最新事件为 {event}"
     return CheckResult(
         "refresh_log",
-        status,
-        summary,
-        {**latest, "invalid_lines": invalid_lines},
+        "PASS",
+        "Access Token 由 Aurora 内部自然续期，外部刷新日志不适用",
+        {"mode": "aurora_internal", "external_refresh": "not_applicable"},
     )
 
 
