@@ -1,6 +1,6 @@
 # 飞牛 fnOS 部署指南：aurora + new-api 反向代理 ChatGPT Web 为 OpenAI 兼容 API
 
-> 本文档记录唯一正式部署。2026-08-04 已完成 Aurora 2.5.0 Session Token 唯一生产切换和 New API rc.23 升级；旧 Aurora 与 canary 已清理，rc.21 镜像及已验证 New API 升级备份继续保留，等待独立清理授权。
+> 本文档记录唯一正式部署。2026-08-04 已完成 Aurora 2.5.0 Session Token 唯一生产切换和 New API rc.23 升级；旧 Aurora、canary 和 rc.21 镜像已清理，已验证 New API 升级备份继续保留。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 > 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
 > 脱敏健康状态生产器、生产 cron、Studio OS 专用只读子挂载和 n8n 工作流导入已于 2026-08-02 完成；合成异常邮件与真实 `PASS` 静默路径均已验证，工作流随后通过最终门禁并正式发布、激活。
@@ -250,7 +250,7 @@ curl http://NAS_IP:3000/v1/chat/completions \
 
 2026-08-04 已把唯一生产 New API 从 rc.21 升级到 rc.23。升级前停止 New API 并
 冷备份整个 `data/new-api/`，随后完成 SQLite 迁移、登录、渠道、核心聊天和容器门禁；
-未触发回退。rc.21 镜像与完整冷备份继续保留，后续清理需要独立授权。
+未触发回退。rc.21 镜像已清理，完整冷备份继续保留；后续删除备份需要独立授权。
 
 多模态验收曾临时把 `gpt-4o`、`gpt-image-2`、`tts-1`、`whisper-1` 加入渠道、
 默认 Token 和 ability，并从 FNOS 仅执行一次以下零重试矩阵：
