@@ -5,10 +5,24 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "docker-compose.canary.yml"
+SESSION_COMPOSE = ROOT / "docker-compose.session-renewal-canary.yml"
 ENV_EXAMPLE = ROOT / ".env.canary.example"
 
 
 class CanaryComposeContractTests(unittest.TestCase):
+    def test_session_renewal_canary_is_parallel_session_only_and_non_restarting(self):
+        text = SESSION_COMPOSE.read_text(encoding="utf-8")
+        self.assertIn("name: aurora-session-renewal-canary", text)
+        self.assertIn('"127.0.0.1:18082:8080"', text)
+        self.assertIn("source: ./.secrets/canary/session_tokens.txt", text)
+        self.assertIn("target: /home/nonroot/session_tokens.txt", text)
+        self.assertIn("read_only: true", text)
+        self.assertIn('user: "65532:65532"', text)
+        self.assertIn('restart: "no"', text)
+        self.assertNotIn("access_tokens.txt", text)
+        self.assertNotIn("new-api", text)
+        self.assertNotIn("18080", text)
+
     def test_canary_compose_is_isolated_and_fail_closed(self):
         text = COMPOSE.read_text(encoding="utf-8")
         self.assertIn("name: aurora-capability-canary", text)

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import struct
 import tempfile
@@ -19,7 +20,7 @@ SCHEMA = (
     Path(__file__).resolve().parents[1]
     / "docs"
     / "contracts"
-    / "aurora-capability-canary-report-v1.schema.json"
+    / "aurora-capability-canary-report-v2.schema.json"
 )
 SPEC = importlib.util.spec_from_file_location("aurora_capability_canary", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -102,7 +103,7 @@ class SanitizedReportTests(unittest.TestCase):
     def test_report_keeps_only_allowlisted_boolean_count_and_media_details(self):
         results = passing_results()
         results[5] = MODULE.CheckResult("files", "FAIL", "route_missing", {})
-        results[6] = MODULE.CheckResult(
+        results[7] = MODULE.CheckResult(
             "image_generation",
             "PASS",
             "image_generation_valid",
@@ -113,11 +114,11 @@ class SanitizedReportTests(unittest.TestCase):
             datetime(2026, 8, 3, 5, 0, tzinfo=timezone.utc),
         )
         parsed = json.loads(MODULE.serialize_report(report))
-        self.assertEqual(parsed["schema_version"], 1)
+        self.assertEqual(parsed["schema_version"], 2)
         self.assertEqual(parsed["checked_at"], "2026-08-03T05:00:00Z")
         self.assertEqual(parsed["overall"], "FAIL")
         self.assertEqual(
-            parsed["targets"]["direct"][6]["details"],
+            parsed["targets"]["direct"][7]["details"],
             {"bytes": 12, "media_type": "image/png", "decodable": True},
         )
 
@@ -169,7 +170,7 @@ class SanitizedReportTests(unittest.TestCase):
 
     def test_serialization_revalidates_forged_report_input(self):
         forged_report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "checked_at": "2026-08-03T05:00:00Z",
             "overall": "PASS",
             "targets": {
@@ -241,19 +242,23 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "unsafe_request")
         urlopen.assert_not_called()
 
-    def test_http_request_rejects_oversized_response_and_does_not_read_http_error_body(self):
+    def test_http_request_rejects_oversized_response_and_sanitizes_upstream_error_body(self):
         target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
         oversized = self.RecordingResponse(b"x" * (MODULE.MAX_RESPONSE_BYTES + 1))
         with mock.patch.object(MODULE.urllib.request, "urlopen", return_value=oversized):
             with self.assertRaises(MODULE.ProbeError) as raised:
                 MODULE.http_request(target, "GET", "/v1/models")
         self.assertEqual(raised.exception.code, "response_too_large")
-        error = MODULE.urllib.error.HTTPError("http://example.invalid", 401, "unauthorized", {}, None)
-        error.read = mock.Mock(side_effect=AssertionError("body must stay unread"))
+        upstream_body = b'{"error":{"type":"synthesize_request_error","message":"private upstream detail"}}'
+        error = MODULE.urllib.error.HTTPError("http://example.invalid", 404, "not found", {}, None)
+        error.read = mock.Mock(return_value=upstream_body)
         with mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
             result = MODULE.http_request(target, "GET", "/v1/models")
-        self.assertEqual(result, MODULE.HttpResponse(401, {}, b""))
-        error.read.assert_not_called()
+        self.assertEqual(result.status, 404)
+        self.assertEqual(result.body, b"")
+        self.assertEqual(result.error_code, "upstream_not_found")
+        error.read.assert_called_once_with(MODULE.MAX_ERROR_BYTES + 1)
+        self.assertNotIn("private upstream detail", repr(result))
 
     def test_http_request_maps_local_transport_exceptions_to_fixed_codes(self):
         target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
@@ -286,6 +291,41 @@ class HttpTests(unittest.TestCase):
                     MODULE.require_success(response)
                 self.assertEqual(raised.exception.code, code)
                 self.assertNotIn("private", str(raised.exception))
+
+    def test_preclassified_upstream_404_is_not_reported_as_a_missing_local_route(self):
+        response = MODULE.HttpResponse(404, {}, b"", error_code="upstream_not_found")
+        with self.assertRaises(MODULE.ProbeError) as raised:
+            MODULE.require_success(response)
+        self.assertEqual(raised.exception.code, "upstream_not_found")
+
+    def test_image_error_wrappers_map_to_sanitized_pipeline_stages(self):
+        cases = (
+            (
+                403,
+                b'{"type":"InitTurnStile_request_error","message":"private sentinel detail"}',
+                "sentinel_failed",
+            ),
+            (
+                500,
+                b'{"error":{"type":"image_generation_error","message":"prepare image conversation failed: private"}}',
+                "image_prepare_failed",
+            ),
+            (
+                500,
+                b'{"error":{"type":"image_generation_error","message":"image conversation failed: private"}}',
+                "image_conversation_failed",
+            ),
+            (
+                500,
+                b'{"error":{"type":"image_generation_error","message":"get conversation failed: private"}}',
+                "image_poll_failed",
+            ),
+        )
+        for status, body, expected in cases:
+            with self.subTest(expected=expected):
+                code = MODULE.classify_http_error(status, body)
+                self.assertEqual(code, expected)
+                self.assertNotIn("private", code)
 
     def test_json_and_sse_are_bounded_and_strict(self):
         payload = MODULE.decode_json(MODULE.HttpResponse(200, {}, b'{"data":[]}'))
@@ -322,11 +362,11 @@ class TextCapabilityTests(unittest.TestCase):
             return response
         return transport
 
-    def test_models_requires_expected_model_ids(self):
+    def test_models_requires_expected_chat_ids_without_using_the_image_catalog_as_a_proxy(self):
         response = MODULE.HttpResponse(
             200,
             {"content-type": "application/json"},
-            b'{"data":[{"id":"gpt-5-6-pro"},{"id":"gpt-5-6-thinking"},{"id":"gpt-image-2"}]}'
+            b'{"data":[{"id":"auto"},{"id":"gpt-5-6-pro"},{"id":"gpt-5-6-thinking"}]}'
         )
         result = MODULE.check_models(self.target, self.transport_for(response))
         self.assertEqual((result.status, result.code, result.details), ("PASS", "models_valid", {"count": 3}))
@@ -532,6 +572,37 @@ class ImageCapabilityTests(unittest.TestCase):
         self.assertEqual(result.details, {"bytes": len(image), "media_type": "image/png", "decodable": True})
         self.assertNotIn("b64_json", result.details)
 
+    def test_generation_accepts_the_documented_optional_revised_prompt_without_reporting_it(self):
+        image = synthetic_png()
+        response = json.dumps({
+            "created": 0,
+            "data": [{
+                "b64_json": base64.b64encode(image).decode("ascii"),
+                "revised_prompt": "private upstream prompt",
+            }],
+        }).encode("utf-8")
+        result = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, response),
+        )
+        self.assertEqual(
+            (result.status, result.code, result.details),
+            ("PASS", "image_generation_valid", {"bytes": len(image), "media_type": "image/png", "decodable": True}),
+        )
+        self.assertNotIn("private upstream prompt", repr(result))
+
+    def test_image_handler_errors_preserve_only_the_sanitized_stage_code(self):
+        result = MODULE.check_image_generation(
+            self.target,
+            lambda *args, **kwargs: MODULE.HttpResponse(
+                500,
+                {},
+                b"",
+                error_code="image_prepare_failed",
+            ),
+        )
+        self.assertEqual((result.status, result.code, result.details), ("FAIL", "image_prepare_failed", {}))
+
     def test_image_results_reject_malformed_base64_and_url_only(self):
         malformed = MODULE.check_image_generation(
             self.target,
@@ -596,6 +667,8 @@ class ImageCapabilityTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[0][1]["body"]), {"model": "gpt-image-2", "prompt": MODULE.IMAGE_GENERATION_PROMPT, "n": 1, "size": "1024x1024", "response_format": "b64_json"})
         self.assertEqual(calls[1][0][2], "/v1/images/edits")
         self.assertEqual(calls[2][0][2], "/v1/images/variations")
+        self.assertNotIn(b'name="prompt"', calls[2][1]["body"])
+        self.assertEqual([call[1].get("timeout") for call in calls], [180, 180, 180])
         self.assertTrue(calls[1][1]["content_type"].startswith("multipart/form-data; boundary="))
         self.assertIn(b'filename="aurora-canary.png"', calls[1][1]["body"])
         self.assertIn(b'name="prompt"', calls[1][1]["body"])
@@ -641,6 +714,51 @@ class FileCapabilityTests(unittest.TestCase):
 
         result = MODULE.check_files(target, transport)
         self.assertEqual((result.status, result.code, result.details), ("FAIL", "files_invalid", {}))
+
+
+class VisionCapabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.target = MODULE.TargetConfig("direct", MODULE.DIRECT_BASE_URL, "secret")
+
+    def test_vision_attaches_a_real_inline_png_and_requires_the_observed_color(self):
+        calls = []
+
+        def transport(*args, **kwargs):
+            calls.append((args, kwargs))
+            return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"BLUE"}}]}')
+
+        result = MODULE.check_vision(self.target, transport)
+        self.assertEqual(
+            (result.status, result.code, result.details),
+            (
+                "PASS",
+                "vision_valid",
+                {"image_uploaded": True, "image_understood": True},
+            ),
+        )
+        self.assertEqual([call[0][2] for call in calls], ["/v1/chat/completions"])
+        chat = json.loads(calls[0][1]["body"])
+        image_part = chat["messages"][0]["content"][1]
+        self.assertEqual(image_part["type"], "image_url")
+        self.assertEqual(
+            base64.b64decode(image_part["image_url"]["url"].removeprefix("data:image/png;base64,"), validate=True),
+            MODULE.make_test_png(),
+        )
+        self.assertNotIn("BLUE", chat["messages"][0]["content"][0]["text"])
+
+    def test_vision_does_not_accept_prompt_echo_or_a_wrong_color(self):
+        answers = (
+            "What is the dominant color in the attached image?",
+            "RED",
+        )
+        for answer in answers:
+            def transport(*args, **kwargs):
+                body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode("utf-8")
+                return MODULE.HttpResponse(200, {}, body)
+
+            with self.subTest(answer=answer):
+                result = MODULE.check_vision(self.target, transport)
+                self.assertEqual((result.status, result.code, result.details), ("FAIL", "vision_invalid", {}))
 
 
 def make_wav(*, channels=1, sample_width=2, frame_rate=16000) -> bytes:
@@ -701,6 +819,25 @@ class AudioHelperTests(unittest.TestCase):
                     MODULE.validate_audio(audio, media_type)
                 self.assertEqual(raised.exception.code, "audio_payload_invalid")
 
+    def test_audio_fixture_is_bounded_validated_and_never_read_from_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "aurora-canary-zh.wav"
+            audio = make_wav()
+            fixture.write_bytes(audio)
+            self.assertEqual(MODULE.read_audio_fixture(fixture), audio)
+
+            secret_fixture = root / ".secrets" / "private.wav"
+            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("must not read secrets")):
+                with self.assertRaises(MODULE.ProbeError) as raised:
+                    MODULE.read_audio_fixture(secret_fixture)
+            self.assertEqual(raised.exception.code, "audio_fixture_invalid")
+
+            fixture.write_bytes(b"not-a-wav")
+            with self.assertRaises(MODULE.ProbeError) as raised:
+                MODULE.read_audio_fixture(fixture)
+            self.assertEqual(raised.exception.code, "audio_fixture_invalid")
+
 
 class AudioCapabilityTests(unittest.TestCase):
     def setUp(self):
@@ -716,9 +853,9 @@ class AudioCapabilityTests(unittest.TestCase):
             if path == "/v1/audio/speech":
                 return MODULE.HttpResponse(200, {"content-type": "audio/wav"}, audio)
             if path == "/v1/audio/transcriptions":
-                return MODULE.HttpResponse(200, {}, '{"text":"这是一次能力测试。"}'.encode("utf-8"))
+                return MODULE.HttpResponse(200, {}, '{"text":"今天是能力测试。"}'.encode("utf-8"))
             if path == "/v1/audio/translations":
-                return MODULE.HttpResponse(200, {}, b'{"text":"This is a capability test."}')
+                return MODULE.HttpResponse(200, {}, b'{"text":"Today is a capability test."}')
             self.fail(f"unexpected path: {path}")
 
         speech, returned_audio = MODULE.check_audio_speech(self.target, transport)
@@ -728,12 +865,57 @@ class AudioCapabilityTests(unittest.TestCase):
         self.assertEqual((transcription.status, transcription.code, transcription.details), ("PASS", "audio_transcription_valid", {"text_present": True, "expected_marker_present": True}))
         self.assertEqual((translation.status, translation.code, translation.details), ("PASS", "audio_translation_valid", {"text_present": True, "english_markers_present": True}))
         self.assertEqual([call[0][2] for call in calls], ["/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations"])
-        self.assertEqual(json.loads(calls[0][1]["body"]), {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "wav"})
+        self.assertEqual(json.loads(calls[0][1]["body"]), {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "mp3"})
         self.assertIn(b'filename="aurora-canary.wav"', calls[1][1]["body"])
         self.assertIn(b'name="language"', calls[1][1]["body"])
         self.assertIn(b'filename="aurora-canary.wav"', calls[2][1]["body"])
         self.assertNotIn("能力测试", repr(transcription))
         self.assertNotIn("capability test", repr(translation))
+
+    def test_tts_requests_mp3_and_accepts_only_ffprobe_decodable_audio(self):
+        payload = b"ID3\x04\x00\x00synthetic-mp3"
+        request_bodies = []
+
+        def transport(*args, **kwargs):
+            request_bodies.append(json.loads(kwargs["body"]))
+            return MODULE.HttpResponse(200, {"content-type": "audio/mpeg"}, payload)
+
+        ffprobe_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "codec_type": "audio",
+                            "codec_name": "mp3",
+                            "sample_rate": "24000",
+                            "channels": 1,
+                        }
+                    ]
+                }
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+        with (
+            mock.patch("shutil.which", return_value="/usr/bin/ffprobe"),
+            mock.patch("subprocess.run", return_value=ffprobe_result) as run_probe,
+        ):
+            result, returned_audio = MODULE.check_audio_speech(self.target, transport)
+
+        self.assertEqual(
+            (result.status, result.code, result.details),
+            (
+                "PASS",
+                "audio_speech_valid",
+                {"bytes": len(payload), "media_type": "audio/mpeg", "decodable": True},
+            ),
+        )
+        self.assertEqual(returned_audio, payload)
+        self.assertEqual(request_bodies[0]["response_format"], "mp3")
+        self.assertEqual(run_probe.call_args.args[0][-1], "pipe:0")
+        self.assertEqual(run_probe.call_args.kwargs["input"], payload)
+        self.assertNotIn("stdout", result.details)
 
     def test_audio_text_mismatches_return_fixed_codes_without_text(self):
         audio = make_wav()
@@ -750,6 +932,41 @@ class AudioCapabilityTests(unittest.TestCase):
         self.assertEqual((transcription.status, transcription.code, transcription.details), ("FAIL", "transcription_mismatch", {}))
         self.assertEqual((translation.status, translation.code, translation.details), ("FAIL", "translation_mismatch", {}))
 
+    def test_transcription_accepts_the_two_stable_chinese_fixture_markers(self):
+        result = MODULE.check_audio_transcription(
+            self.target,
+            make_wav(),
+            lambda *args, **kwargs: MODULE.HttpResponse(
+                200,
+                {},
+                '{"text":"今天进行能力测验。"}'.encode("utf-8"),
+            ),
+        )
+        self.assertEqual(
+            (result.status, result.code, result.details),
+            ("PASS", "audio_transcription_valid", {"text_present": True, "expected_marker_present": True}),
+        )
+
+    def test_translation_accepts_safe_english_synonyms_but_rejects_untranslated_chinese(self):
+        accepted = MODULE.check_audio_translation(
+            self.target,
+            make_wav(),
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, b'{"text":"Today is an ability assessment."}'),
+        )
+        untranslated = MODULE.check_audio_translation(
+            self.target,
+            make_wav(),
+            lambda *args, **kwargs: MODULE.HttpResponse(200, {}, '{"text":"今天是能力测试。"}'.encode("utf-8")),
+        )
+        self.assertEqual(
+            (accepted.status, accepted.code, accepted.details),
+            ("PASS", "audio_translation_valid", {"text_present": True, "english_markers_present": True}),
+        )
+        self.assertEqual(
+            (untranslated.status, untranslated.code, untranslated.details),
+            ("FAIL", "translation_mismatch", {}),
+        )
+
 
 def passing_results():
     return [
@@ -759,6 +976,7 @@ def passing_results():
         MODULE.CheckResult("responses_nonstream", "PASS", "responses_nonstream_valid", {"completed": True, "output_count": 1}),
         MODULE.CheckResult("responses_stream", "PASS", "responses_stream_valid", {"created": True, "output_seen": True, "completed": True, "done": True}),
         MODULE.CheckResult("files", "PASS", "files_valid", {"upload_accepted": True, "file_id_present": True, "answer_present": True}),
+        MODULE.CheckResult("vision", "PASS", "vision_valid", {"image_uploaded": True, "image_understood": True}),
         MODULE.CheckResult("image_generation", "PASS", "image_generation_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
         MODULE.CheckResult("image_edit", "PASS", "image_edit_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
         MODULE.CheckResult("image_variation", "PASS", "image_variation_valid", {"bytes": 1, "media_type": "image/png", "decodable": True}),
@@ -784,6 +1002,8 @@ class MatrixOrchestrationTests(unittest.TestCase):
             if path == "/v1/chat/completions":
                 if b'"stream":true' in kwargs.get("body", b""):
                     return MODULE.HttpResponse(200, {"content-type": "text/event-stream"}, b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\ndata: [DONE]\n\n')
+                if MODULE.VISION_PROMPT.encode("utf-8") in kwargs.get("body", b""):
+                    return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"BLUE"}}]}')
                 return MODULE.HttpResponse(200, {}, b'{"choices":[{"message":{"content":"AURORA-CANARY-FILE-OK"}}]}')
             if path == "/v1/responses":
                 if b'"stream":true' in kwargs.get("body", b""):
@@ -797,9 +1017,9 @@ class MatrixOrchestrationTests(unittest.TestCase):
             if path == "/v1/audio/speech":
                 return MODULE.HttpResponse(200, {"content-type": "audio/wav"}, audio)
             if path == "/v1/audio/transcriptions":
-                return MODULE.HttpResponse(200, {}, '{"text":"这是一次能力测试。"}'.encode("utf-8"))
+                return MODULE.HttpResponse(200, {}, '{"text":"今天是能力测试。"}'.encode("utf-8"))
             if path == "/v1/audio/translations":
-                return MODULE.HttpResponse(200, {}, b'{"text":"This is a capability test."}')
+                return MODULE.HttpResponse(200, {}, b'{"text":"Today is a capability test."}')
             self.fail(f"unexpected request: {path}")
 
         results = MODULE.run_target(self.direct, transport)
@@ -808,6 +1028,7 @@ class MatrixOrchestrationTests(unittest.TestCase):
         self.assertEqual([path for _, path in requests], [
             "/v1/models", "/v1/chat/completions", "/v1/chat/completions",
             "/v1/responses", "/v1/responses", "/v1/files", "/v1/chat/completions",
+            "/v1/chat/completions",
             "/v1/images/generations", "/v1/images/edits", "/v1/images/variations",
             "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations",
         ])
@@ -829,26 +1050,57 @@ class MatrixOrchestrationTests(unittest.TestCase):
 
     def test_run_matrix_runs_gateway_only_after_all_direct_checks_pass(self):
         calls = []
+        audio_fixture = make_wav()
 
-        def run_target(target, transport):
-            calls.append(target.name)
+        def run_target(target, transport, *, audio_fixture=None):
+            calls.append((target.name, audio_fixture))
             return passing_results()
 
         with mock.patch.object(MODULE, "run_target", side_effect=run_target):
-            results = MODULE.run_matrix(self.direct, self.gateway, target_mode="both")
-        self.assertEqual(calls, ["direct", "gateway"])
+            results = MODULE.run_matrix(
+                self.direct,
+                self.gateway,
+                target_mode="both",
+                audio_fixture=audio_fixture,
+            )
+        self.assertEqual(calls, [("direct", audio_fixture), ("gateway", audio_fixture)])
         self.assertEqual(set(results), {"direct", "gateway"})
         self.assertTrue(all(result.status == "PASS" for target in results.values() for result in target))
 
-    def test_run_target_marks_audio_children_as_failed_dependencies(self):
+    def test_run_target_reports_missing_fixture_without_claiming_transcription_failure(self):
         with mock.patch.object(MODULE, "check_audio_speech", return_value=(MODULE.CheckResult("audio_speech", "FAIL", "connectivity_failed", {}), None)):
             results = MODULE.run_target(self.direct, lambda *args, **kwargs: MODULE.HttpResponse(401, {}, b""))
         self.assertEqual(
             [(result.name, result.code, result.details) for result in results[-3:]],
             [
                 ("audio_speech", "connectivity_failed", {}),
-                ("audio_transcription", "dependency_failed", {"dependency": "audio_speech"}),
-                ("audio_translation", "dependency_failed", {"dependency": "audio_speech"}),
+                ("audio_transcription", "audio_fixture_unavailable", {}),
+                ("audio_translation", "audio_fixture_unavailable", {}),
+            ],
+        )
+
+    def test_run_target_uses_independent_fixture_when_tts_fails(self):
+        audio = make_wav()
+
+        def transport(target, method, path, **kwargs):
+            if path == "/v1/audio/transcriptions":
+                return MODULE.HttpResponse(200, {}, '{"text":"今天是能力测试。"}'.encode("utf-8"))
+            if path == "/v1/audio/translations":
+                return MODULE.HttpResponse(200, {}, b'{"text":"Today is a capability test."}')
+            return MODULE.HttpResponse(401, {}, b"")
+
+        with mock.patch.object(
+            MODULE,
+            "check_audio_speech",
+            return_value=(MODULE.CheckResult("audio_speech", "FAIL", "upstream_not_found", {}), None),
+        ):
+            results = MODULE.run_target(self.direct, transport, audio_fixture=audio)
+        self.assertEqual(
+            [(result.name, result.status, result.code) for result in results[-3:]],
+            [
+                ("audio_speech", "FAIL", "upstream_not_found"),
+                ("audio_transcription", "PASS", "audio_transcription_valid"),
+                ("audio_translation", "PASS", "audio_translation_valid"),
             ],
         )
 
@@ -863,7 +1115,7 @@ class MatrixOrchestrationTests(unittest.TestCase):
             events.append("gateway-key")
             return "gateway-secret"
 
-        def run_target(target, transport=MODULE.http_request):
+        def run_target(target, transport=MODULE.http_request, *, audio_fixture=None):
             events.append(f"run-{target.name}")
             return passing_results()
 
@@ -871,6 +1123,7 @@ class MatrixOrchestrationTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(MODULE, "read_env_value", side_effect=read_env),
             mock.patch.object(MODULE, "read_single_secret", side_effect=read_secret),
+            mock.patch.object(MODULE, "read_audio_fixture", return_value=make_wav()) as read_fixture,
             mock.patch.object(MODULE, "run_target", side_effect=run_target),
             contextlib.redirect_stdout(io.StringIO()) as stdout,
             contextlib.redirect_stderr(io.StringIO()) as stderr,
@@ -879,9 +1132,11 @@ class MatrixOrchestrationTests(unittest.TestCase):
                 "--allow-real-api", "--target", "both", "--json",
                 "--env-file", str(Path(directory) / "env"),
                 "--gateway-key-file", str(Path(directory) / "key"),
+                "--audio-fixture", str(Path(directory) / "fixture.wav"),
             ])
         self.assertEqual(exit_code, 0)
         self.assertEqual(events, ["env", "run-direct", "gateway-key", "run-gateway"])
+        read_fixture.assert_called_once()
         self.assertEqual(stderr.getvalue(), "")
         output = stdout.getvalue()
         self.assertIn('"overall":"PASS"', output)
@@ -980,18 +1235,18 @@ class SchemaContractTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(schema["properties"]["targets"]["properties"]), {"direct", "gateway"})
         results = schema["$defs"]["results"]
-        self.assertEqual((results.get("minItems"), results.get("maxItems"), results.get("items")), (12, 12, False))
+        self.assertEqual((results.get("minItems"), results.get("maxItems"), results.get("items")), (13, 13, False))
         self.assertEqual(
             [item.get("$ref", "").removeprefix("#/$defs/") for item in results.get("prefixItems", [])],
             list(MODULE.EXPECTED_CHECKS),
         )
         check = schema["$defs"].get("check", {})
-        self.assertEqual(len(check.get("oneOf", [])), 12)
+        self.assertEqual(len(check.get("oneOf", [])), 13)
 
     def test_runtime_and_schema_reject_cross_media_types(self):
         with SCHEMA.open(encoding="utf-8") as stream:
             schema = json.load(stream)
-        for index, wrong_media in ((6, "audio/wav"), (9, "image/png")):
+        for index, wrong_media in ((7, "audio/wav"), (10, "image/png")):
             results = passing_results()
             details = dict(results[index].details)
             details["media_type"] = wrong_media
@@ -1012,6 +1267,7 @@ class SchemaContractTests(unittest.TestCase):
             "responses_nonstream": ("responses_nonstream_valid", {"completed", "output_count"}, set()),
             "responses_stream": ("responses_stream_valid", {"created", "output_seen", "completed", "done"}, set()),
             "files": ("files_valid", {"upload_accepted", "file_id_present", "answer_present"}, set()),
+            "vision": ("vision_valid", {"image_uploaded", "image_understood"}, set()),
             "image_generation": ("image_generation_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
             "image_edit": ("image_edit_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
             "image_variation": ("image_variation_valid", {"bytes", "media_type", "decodable"}, {"image/png"}),
@@ -1072,3 +1328,16 @@ class SchemaContractTests(unittest.TestCase):
                 malformed["targets"]["direct"][index]["details"][key] = invalid_value
                 with self.subTest(check=result["name"], detail=key):
                     assert_rejected(malformed)
+
+    def test_runtime_rejects_tts_as_a_transcription_or_translation_dependency(self):
+        for index in (11, 12):
+            results = passing_results()
+            results[index] = MODULE.CheckResult(
+                results[index].name,
+                "FAIL",
+                "dependency_failed",
+                {"dependency": "audio_speech"},
+            )
+            with self.subTest(check=results[index].name):
+                with self.assertRaises(ValueError):
+                    MODULE.build_report({"direct": results})

@@ -1,6 +1,6 @@
 # Solis_Aurora_Gateway 能力优先升级设计
 
-状态：设计方向已确认，书面规格待用户复核；尚未实施、提交或部署
+状态：设计方向已确认；直接能力 canary 已形成阶段性证据，session-token 自然续期与重启恢复尚待独立门禁，生产切换尚未实施
 
 日期：2026-08-03
 
@@ -25,6 +25,8 @@
 - 2026-07-27 的真实图片请求已经穿过 New API 到达 Aurora/ChatGPT 链路，最终失败于上游 `403 sentinel prepare failed`。因此“图片不可用”不能归因于 New API 没有图片路由。
 - 现有 `refresh_chatgpt_access_token.py` 会要求新 JWT 到期时间晚于旧 JWT；2026-08-03 的真实 session 交换没有满足此条件，因此安全失败。
 - 现有 n8n 工作流只消费脱敏 `latest.json` 并告警，不执行换 Token、调用模型或修改 Aurora。
+- Aurora 2.5.0 的账号恢复逻辑不是按 JWT 到期时间主动轮换：启动时用 `session_token` 交换 access token；受保护请求鉴权失败后把账号标记为 expired；默认每 10 分钟的 health check 只重试 expired 账号。到期前再次调用 session 接口得到同一枚 access token 符合该机制，不能单独判定续期失败。
+- 当前上游实现没有把 session 接口返回的轮换后 session token 写回账号对象或凭据文件，也没有可确认的续期专项自动化测试；因此自然续期和重启恢复必须分别取得现场证据，不能由 README 声明替代。
 
 ### 2.2 上游当前声明，尚未在本项目验证
 
@@ -38,6 +40,15 @@ Aurora 上游 `main` 当前标记为 `2.5.0`。其官方 README/API 声明支持
 - 通过 `Authorization` 环境变量配置稳定的服务访问 key。
 
 上述内容是候选能力清单，不是本项目的已验证生产能力。镜像 digest、CPU 架构、实际账号能力、代理兼容性、Token 持久性、New API 转发兼容性和重启恢复都必须在隔离 canary 中逐项验证。
+
+### 2.3 2026-08-04 隔离 canary 阶段性证据
+
+- 直接 Aurora 路径累计通过 13 项中的 12 项：模型目录、Chat 非流式/流式、Responses 非流式/流式、Files、图片理解、图片生成、图片编辑、图片变体、语音合成和语音转写。
+- 图片能力由实际可解码 PNG 证明，不依赖 `/v1/models` 是否列出 `gpt-image-2`；当前模型目录没有该 ID，因此模型枚举不得作为图片能力代理。
+- TTS 已通过受控复验：Aurora 把初始请求的 `wav` 映射为 AAC，而原探针只接受 PCM WAV，导致合法压缩音频也被误判。候选探针改为官方示例 `mp3` 后，现场返回 HTTP `200`；FNOS 现有 `ffprobe` 从 stdin 确认为可解码 MP3、24 kHz、单声道、28,800 字节，全程未落盘媒体。此前一次 synthesize `404` 应保留为上游瞬时失败证据，不能再概括为路由不存在或 TTS 不可用。
+- 音频翻译已定位为 Aurora 2.5.0 实现缺陷：`isTranslation=true` 没有进入任何后续分支，最终仍调用 `/backend-api/transcribe`，所以 HTTP `200` 返回中文并非账号或 WAV 问题。当前 `main` 保持同一实现，不能靠换用未固定的最新镜像解决。
+- 英文音频到简体中文已用固定合成 WAV 完成一次组合链路复验：`/v1/audio/transcriptions` 转写后，再由 `gpt-4o` 翻译内存中的文本；两个端点均为 HTTP `200`，脱敏结构与语义断言通过。该能力应明确建模为“转写 + Chat 翻译”，不能冒充 `/v1/audio/translations` 的原生目标语言能力，也不计入十三项原生矩阵。
+- 以上是完整矩阵与后续单项复验形成的累计证据，不是一份全绿的单次报告。direct 仍因音频翻译实现缺陷未全绿，因此没有创建或调用 New API canary，也没有进入自然续期、重启恢复或生产切换。
 
 上游资料：
 
@@ -73,11 +84,11 @@ Aurora 上游 `main` 当前标记为 `2.5.0`。其官方 README/API 声明支持
 
 ### 4.1 方案 A：New API + Aurora 内部凭据池（采用）
 
-客户端仍访问 New API。New API 的 Aurora 渠道密钥改为稳定的 Aurora 服务访问 key；Aurora 从只读挂载的 session/refresh 凭据源建立内部账号池并承担 access token 获取和续期。
+客户端仍访问 New API。New API 的 Aurora 渠道密钥改为稳定的 Aurora 服务访问 key；Aurora 从只读挂载的 `session_tokens.txt` 建立内部账号池并承担 access token 获取和失败后的低频自愈。
 
 优点：保留统一网关和完整能力；过期 access token 不再进入 New API；凭据生命周期与真正使用凭据的组件归一。
 
-风险：上游账号池和自动续期尚未在 FNOS 当前环境验证；只读凭据挂载与续期后的重启恢复可能冲突，必须以 canary 证据决定是否可部署。
+风险：上游账号池、自然到期后的自愈和重启恢复尚未在 FNOS 当前环境验证；上游不持久化轮换后的 session token，必须以 canary 证据决定是否可部署。
 
 ### 4.2 方案 B：继续由宿主机更新 New API 的 access token（拒绝为长期方案）
 
@@ -113,8 +124,7 @@ Mihomo :7890
 ChatGPT Web 上游
 
 FNOS 只读凭据源
-  ├─ session_tokens.txt 或
-  └─ refresh_tokens.txt
+  └─ session_tokens.txt
         │  仅 Aurora 容器可读
         └──────────────▶ Aurora 内部账号池
 ```
@@ -141,32 +151,32 @@ FNOS 只读凭据源
 
 ## 6. 凭据与文件权限设计
 
-### 6.1 凭据来源优先级
+### 6.1 凭据来源
 
-1. 若用户已经合法持有可用 `refresh_token`，优先在 canary 验证 `refresh_tokens.txt`，因为其语义就是续期凭据。
-2. 否则验证现有 `session_token` 账号池；不能仅凭容器启动或模型列表成功判定其可长期续期。
-3. 单独的短期 `access_tokens.txt` 只可作为能力 canary 或紧急回滚输入，不能成为目标生产凭据权威。
+1. 目标方案只使用用户合法取得的 ChatGPT `session_token`，以官方 `session_tokens.txt` 账号池格式交给 Aurora；不并行引入 `refresh_tokens.txt`，也不把两种凭据混用。
+2. 单独的短期 `access_tokens.txt` 只可作为能力 canary 或紧急回滚输入，不能成为目标生产凭据权威。
+3. 容器启动、模型列表成功或到期前 session 交换返回同一 access token，都不能证明长期续期成功；必须等待自然到期后的真实自愈证据。
 
-本项目不设计抓取、窃取或绕过登录流程获取 refresh/session token 的方式。没有合法可持续凭据时，生产切换被阻塞。
+本项目不设计抓取、窃取或绕过登录流程获取 session token 的方式。没有合法可持续凭据时，生产切换被阻塞。
 
 ### 6.2 最小权限
 
 - 凭据文件留在 Git 忽略的 `.secrets/`，宿主机目录不允许其他普通用户读取。
-- Aurora 只读挂载上游文档要求的单个账号池文件，不挂载整个 `.secrets/`。
+- Aurora 只把专用 `session_tokens.txt` 挂载到容器内 `/home/nonroot/session_tokens.txt`，不挂载整个 `.secrets/`，也不同时挂载 access/refresh 账号池。
 - 不把凭据放入镜像、Compose 跟踪文本、命令行参数、日志或健康状态。
-- 容器不得通过把文件改成 world-readable 来解决 UID/GID 问题。候选方案必须使用专用组读权限、受控 ACL 或经验证的 Compose secret 机制；具体方式在 FNOS canary 中择一验证。
-- 如果候选 Aurora 必须写回 session/refresh 文件才能在重启后续期，而只读挂载无法满足，则本设计的生产门禁失败。不得未经另行设计和批准把凭据目录改为读写。
+- Aurora 2.5.0 以 `65532:65532` 运行；专用文件必须归属 `65532:65532`、权限 `600`，并以只读 bind mount 提供。不得通过改成 `644` 或挂载整个目录绕过读取失败。
+- 如果候选 Aurora 必须写回 session 文件才能在自然续期或重启后恢复，而只读挂载无法满足，则本设计的生产门禁失败。不得未经另行设计和批准把凭据目录改为读写。
 
 ### 6.3 续期与重启生存性
 
-上游声称会在内存中定期续期，但本项目还不知道更新后的 session/refresh 状态是否需要落盘。canary 必须依次证明：
+Aurora 的现有机制是“受保护请求鉴权失败后标记 expired，再由默认 10 分钟 health check 重试”，不是按到期时间高频主动换新。本项目接受这一低频机制，不新增宿主机 renewal supervisor，不按分钟主动调用 session 接口，不自动移动 Token，也不让 n8n 执行补偿。canary 必须依次证明：
 
 1. 从批准的只读凭据源建立可用登录账号；
-2. 在原 access token 自然到期后，不经人工调用仍可完成真实受保护能力请求；
+2. 在原 access token 自然到期且一次预先批准、固定低频的受保护健康请求暴露鉴权失败后，Aurora 能在首次失败起 15 分钟内、至少跨过一个 10 分钟 health-check 周期自行恢复；不得为触发续期而增加高频请求；
 3. 只重启 canary Aurora 后，仍能从同一只读凭据源恢复并完成请求；
 4. 全程没有扩大文件权限、输出凭据或依赖 New API 中的旧 JWT。
 
-任一项失败都表示“上游自动续期”不适合当前 FNOS 生产设计，继续保留旧生产并重新评估凭据来源；不得以跳过首次自然续期来换取上线速度。
+自然续期超过上述窗口仍未恢复时，或受控重启后不能恢复时，停止自动推进，只发布脱敏 FAIL 并通过既有 n8n 邮件链通知用户人工修补。不得自动修改凭据、重建或重启生产组件、调用额外补偿接口，亦不得恢复宿主机换 Token 方案。任一项失败都表示当前方案不适合生产切换；不得以跳过首次自然续期或重启恢复来换取上线速度。
 
 ## 7. 多模态能力验收矩阵
 
@@ -178,12 +188,13 @@ FNOS 只读凭据源
 | Chat Completions | 必须 | 必须 | 非流式结构合法；再验证流式结束 |
 | Responses | 必须 | 必须 | 非流式结构与 SSE 事件序列合法 |
 | Files + 文件问答 | 必须 | 必须 | 小型合成文本上传、返回 file id、问答成功 |
+| 图片理解 | 必须 | 必须 | 上传确定性合成 PNG，模型正确识别主色；不接受提示词回显 |
 | 图片生成 | 必须 | 必须 | `gpt-image-2` 产生可解码图片；不接受仅渠道测试成功 |
 | 图片编辑 | 必须 | 必须 | 对合成源图执行明确变更并得到可解码图片 |
 | 图片变体 | 必须 | 必须 | 无编辑提示的变体调用得到可解码图片 |
 | 语音合成 | 必须 | 必须 | 非空音频、MIME/容器格式正确、可解码 |
-| 语音转文字 | 必须 | 必须 | 合成音频转写得到预期短句 |
-| 音频翻译为英文 | 必须 | 必须 | 非英语合成音频得到语义相符英文文本 |
+| 语音转文字 | 必须 | 必须 | 独立的非敏感 WAV 样本转写得到预期短句，不依赖同轮 TTS |
+| 音频翻译为英文 | 必须 | 必须 | 同一独立非英语 WAV 样本得到语义相符英文文本 |
 
 对图片和音频，不以 HTTP `200` 或非空 body 单独判定成功；必须校验返回结构、媒体格式和最小可解码性。对 URL 返回必须限制域名并禁止在报告中输出带签名 URL。对 base64 返回只做长度、解码和媒体头检查，不打印正文。
 
@@ -227,15 +238,16 @@ FNOS 只读凭据源
 - New API 与 Aurora 的服务 key 是否只在内存中完成一致性比较；状态只输出布尔值；
 - Aurora 账号池文件挂载是否存在、是否只读、是否满足批准的最小权限；
 - 最近一次受控能力探测是否成功、是否过期；
-- 首次自然续期是否已经观察通过。
+- 首次自然续期是否已经观察通过；
+- 最近一次自然续期/重启恢复门禁的结果枚举，仅允许 `not_observed`、`pass` 或 `fail`，不得包含凭据、响应或错误正文。
 
-Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不得虚构“当前 access token 到期时间”或从自由文本日志猜测成功。canary 阶段必须找到并验证稳定的第一方机器可读信号；若不存在，则状态只能诚实报告“当前受保护能力探测是否成功”和“首次自然续期是否已验证”，不能声称知道 Aurora 内部 Token 状态。
+Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不得虚构“当前 access token 到期时间”或从自由文本日志猜测成功。若没有稳定的第一方机器可读信号，状态只能根据受控健康请求和观察窗口诚实报告“最近受保护能力探测结果”与“自然续期/重启恢复是否已验证”，不能声称知道 Aurora 内部 Token 状态或内部换新次数。
 
 ### 9.3 工作流兼容
 
 新 Schema 的生产器、验证器和 n8n 工作流导出必须先在 Windows 完成测试。实例工作流在生产切换前保持现状；切换窗口中，生产器与工作流必须作为同一兼容性变更受控发布，避免旧验证器把新 Schema 当成损坏文件。
 
-异常邮件仍复用现有 SMTP Credential，仅在实例内绑定；正常状态继续静默。工作流、SMTP、数据库、Compose 和 cron 的每类现场变更仍保持独立批准。
+异常邮件仍复用现有 SMTP Credential，仅在实例内绑定；正常状态继续静默。自然续期或重启恢复失败时由 Aurora 健康生产器发布脱敏 FAIL，现有 Aurora Gateway Alert 只读消费并通知；n8n 不读取凭据、不调用 Aurora、不执行重试或修复。工作流、SMTP、数据库、Compose 和 cron 的每类现场变更仍保持独立批准。
 
 ## 10. 隔离 canary 设计
 
@@ -253,11 +265,11 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 1. 静态核对候选镜像来源、许可证、版本、架构、digest 和配置差异。
 2. 创建 Aurora-only canary，验证启动、账号池读取、稳定服务 key 和直接能力矩阵。
 3. 创建隔离 New API canary，验证客户端 key、渠道服务 key和完整转发矩阵。
-4. 保持 canary 运行直到旧 access token 自然到期，验证无需人工换 Token 仍可请求。
-5. 只重启 canary Aurora，验证同一只读凭据源可以恢复。
+4. 改用只读 `session_tokens.txt` 的独立 canary，保持运行直到内部 access token 自然到期；由预先批准、固定低频的受保护健康请求暴露失败，并观察最多 15 分钟、至少一个 health-check 周期，验证 Aurora 自愈，不增加主动换新或补偿调用。
+5. 在另行批准的受控门禁中只重启 canary Aurora，验证同一只读 session 凭据源可以恢复；生产不配置自动重启补偿。
 6. 输出只含布尔值、枚举、时间和计数的脱敏报告；随后由用户决定是否进入生产切换计划。
 
-任何阶段失败，只停止和清理本轮另行批准创建的 canary 资源；生产不变。canary 清理也是独立授权，不因失败自动删除证据。
+任何阶段失败，停止自动推进，保留脱敏状态证据并通知用户；生产不变。不得自动修改凭据、重启/重建组件或执行补偿方案。canary 清理也是独立授权，不因失败自动删除证据。
 
 ## 11. 生产切换与回退设计
 
@@ -310,9 +322,10 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 ### 12.2 FNOS canary
 
 - 容器来源、digest、架构、用户 UID/GID、挂载只读和代理路径均符合设计。
-- 九项能力在直接 Aurora 和 New API 两条路径全部通过。
+- 十三项检查在直接 Aurora 和 New API 两条路径全部通过。
 - 响应中不输出凭据；测试报告不包含业务正文、签名 URL、媒体 base64 或原始日志。
 - 原 access token 自然到期后仍能使用；canary 重启后仍能恢复。
+- 自然续期失败时最多等待已定义的 15 分钟观察窗，此后状态为脱敏 FAIL；没有宿主换新、自动重启或额外补偿调用。
 - 生产容器、Compose 标签、挂载、cron、SQLite、n8n 与 Git 状态无变化。
 
 ### 12.3 生产验收
@@ -320,7 +333,7 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 - New API 客户端仍使用原入口和客户端 API key。
 - New API 渠道不再保存 ChatGPT JWT；Aurora 服务 key 匹配但不输出值。
 - 图片、文件和音频能力只在实测通过后进入渠道模型、客户端 Token 范围和 abilities。
-- 旧 refresh cron 已暂停，新状态生产与 n8n 告警按 Asia/Shanghai 计划运行。
+- 旧 refresh cron 已暂停且未被替代为新的宿主换新任务；新状态生产与 n8n 告警按 Asia/Shanghai 计划运行。
 - 正常状态静默，合成异常可通知；不得用合成执行代替首次自然续期证据。
 - 观察期结束前不删除旧脚本、备份或回退资料。
 
@@ -345,7 +358,7 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 
 ### 实施制品
 
-本地准备阶段的可审查制品为：[准备计划](../plans/2026-08-03-aurora-capability-canary-local-preparation.md)、[能力报告 Schema](../../contracts/aurora-capability-canary-report-v1.schema.json) 和 [候选运行手册](../../aurora_capability_canary.md)。健康 `latest.json` Schema v2 不属于本计划：canary 尚未建立稳定的第一方续期信号。这是有范围的延期，不是未填补的占位项。
+本地准备阶段的当前可审查制品为：[能力报告 Schema v2](../../contracts/aurora-capability-canary-report-v2.schema.json) 和 [候选运行手册](../../aurora_capability_canary.md)；[准备计划](../plans/2026-08-03-aurora-capability-canary-local-preparation.md) 与能力报告 Schema v1 保留为初始实现历史。这里的能力报告 Schema v2 与生产健康 `latest.json` Schema v2 是两个不同合同；后者仍因 canary 尚未建立稳定的第一方续期信号而延期。
 
 1. **本地准备计划**：候选版本/许可证/digest 核对，Compose 候选覆盖，健康 Schema 与测试，文档差异；不连接 FNOS。
 2. **FNOS 隔离 canary 计划**：只读基线、镜像拉取、独立容器/数据、真实能力矩阵、首次自然续期和重启恢复；不修改生产栈。
@@ -357,7 +370,8 @@ Aurora 上游目前没有文档化的脱敏账号池健康端点。本项目不�
 
 - 采用能力优先，而不是围绕旧外部 access token 更新链继续加补丁。
 - 保留 New API，但把它收敛为客户端网关；不让它继续持有短期 ChatGPT JWT。
-- Aurora 成为 ChatGPT Web 凭据和能力权威，前提是隔离 canary 证明账号池、自动续期和重启恢复真实可用。
+- Aurora 成为 ChatGPT Web 凭据和能力权威，前提是只读 session-token canary 证明官方低频自愈和重启恢复真实可用。
 - 图片/音频不可用不能再仅由渠道测试、路由存在或文档声明判断，必须同时通过直接 Aurora 和 New API 两条真实链路。
 - 在首次自然续期通过前，生产不切换；如果无法获得合法可持续凭据，明确阻塞而不是假装自动续期成功。
+- 不新增宿主 renewal supervisor、主动高频换新或自动重启补偿；失败只发布脱敏 FAIL 并通知用户人工修补。
 - n8n 继续只读告警，不获得 Aurora Credential，也不执行任何换新或模型调用。

@@ -13,7 +13,9 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
+import subprocess
 import sys
 import struct
 import tempfile
@@ -32,6 +34,7 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_DECODED_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_REPORT_BYTES = 32 * 1024
+MAX_ERROR_BYTES = 8 * 1024
 STATUS_ORDER = {"PASS": 0, "FAIL": 1}
 EXPECTED_CHECKS = (
     "models",
@@ -40,6 +43,7 @@ EXPECTED_CHECKS = (
     "responses_nonstream",
     "responses_stream",
     "files",
+    "vision",
     "image_generation",
     "image_edit",
     "image_variation",
@@ -50,6 +54,8 @@ EXPECTED_CHECKS = (
 TRANSPORT_ERROR_CODES = {
     "auth_failed",
     "upstream_forbidden",
+    "upstream_not_found",
+    "sentinel_failed",
     "route_missing",
     "rate_limited",
     "upstream_failed",
@@ -65,6 +71,7 @@ PASS_DETAIL_KEYS = {
     "responses_nonstream_valid": {"completed", "output_count"},
     "responses_stream_valid": {"created", "output_seen", "completed", "done"},
     "files_valid": {"upload_accepted", "file_id_present", "answer_present"},
+    "vision_valid": {"image_uploaded", "image_understood"},
     "image_generation_valid": {"bytes", "media_type", "decodable"},
     "image_edit_valid": {"bytes", "media_type", "decodable"},
     "image_variation_valid": {"bytes", "media_type", "decodable"},
@@ -80,9 +87,14 @@ STRUCTURE_ERROR_CODES = {
     "responses_nonstream_invalid",
     "responses_stream_invalid",
     "files_invalid",
+    "vision_invalid",
     "image_payload_invalid",
     "image_url_not_accepted",
+    "image_prepare_failed",
+    "image_conversation_failed",
+    "image_poll_failed",
     "audio_payload_invalid",
+    "audio_fixture_unavailable",
     "transcription_mismatch",
     "translation_mismatch",
     "dependency_failed",
@@ -95,6 +107,7 @@ PASS_CODES_BY_CHECK = {
     "responses_nonstream": "responses_nonstream_valid",
     "responses_stream": "responses_stream_valid",
     "files": "files_valid",
+    "vision": "vision_valid",
     "image_generation": "image_generation_valid",
     "image_edit": "image_edit_valid",
     "image_variation": "image_variation_valid",
@@ -109,18 +122,21 @@ FAIL_CODES_BY_CHECK = {
     "responses_nonstream": {"responses_nonstream_invalid"},
     "responses_stream": {"responses_stream_invalid"},
     "files": {"files_invalid"},
-    "image_generation": {"image_payload_invalid", "image_url_not_accepted"},
-    "image_edit": {"image_payload_invalid", "image_url_not_accepted"},
-    "image_variation": {"image_payload_invalid", "image_url_not_accepted"},
+    "vision": {"vision_invalid"},
+    "image_generation": {"image_payload_invalid", "image_url_not_accepted", "image_prepare_failed", "image_conversation_failed", "image_poll_failed"},
+    "image_edit": {"image_payload_invalid", "image_url_not_accepted", "image_prepare_failed", "image_conversation_failed", "image_poll_failed"},
+    "image_variation": {"image_payload_invalid", "image_url_not_accepted", "image_prepare_failed", "image_conversation_failed", "image_poll_failed"},
     "audio_speech": {"audio_payload_invalid"},
-    "audio_transcription": {"audio_payload_invalid", "transcription_mismatch"},
-    "audio_translation": {"audio_payload_invalid", "translation_mismatch"},
+    "audio_transcription": {"audio_payload_invalid", "audio_fixture_unavailable", "transcription_mismatch"},
+    "audio_translation": {"audio_payload_invalid", "audio_fixture_unavailable", "translation_mismatch"},
 }
 OUTPUT_WRITE_FAILED = "output_write_failed"
 CLI_ERROR_CODES = {
     "real_api_not_authorized",
     "credential_unavailable",
     "credential_invalid",
+    "audio_fixture_unavailable",
+    "audio_fixture_invalid",
     "report_too_large",
     "invalid_check_order",
     "invalid_target_mode",
@@ -149,9 +165,10 @@ ALLOWED_PATHS = {
 CHAT_PROMPT = "Reply with exactly: AURORA-CANARY-OK"
 RESPONSES_INPUT = "Reply with exactly: AURORA-CANARY-OK"
 FILE_MARKER = "AURORA-CANARY-FILE-OK"
+VISION_PROMPT = "What is the dominant color in the attached image? Reply with only the uppercase English color name."
 IMAGE_GENERATION_PROMPT = "A small synthetic blue square on a plain white background."
 IMAGE_EDIT_PROMPT = "Change the blue square to red while preserving the canvas size."
-REQUIRED_MODEL_IDS = {"gpt-5-6-pro", "gpt-5-6-thinking", "gpt-image-2"}
+REQUIRED_MODEL_IDS = {"gpt-5-6-pro", "gpt-5-6-thinking"}
 
 
 class ProbeError(RuntimeError):
@@ -165,6 +182,7 @@ class HttpResponse:
     status: int
     headers: Mapping[str, str]
     body: bytes
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +207,41 @@ class TargetConfig:
 
 
 Transport = Callable[..., HttpResponse]
+
+
+def classify_http_error(status: int, body: bytes) -> str:
+    mapping = {
+        401: "auth_failed",
+        403: "upstream_forbidden",
+        404: "route_missing",
+        429: "rate_limited",
+    }
+    fallback = "upstream_failed" if status >= 500 else mapping.get(status, "http_failed")
+    if len(body) > MAX_ERROR_BYTES:
+        return fallback
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    error = payload.get("error")
+    wrapped = error if isinstance(error, dict) else payload
+    error_type = wrapped.get("type")
+    message = wrapped.get("message")
+    if error_type == "synthesize_request_error" and status == 404:
+        return "upstream_not_found"
+    if error_type == "InitTurnStile_request_error":
+        return "sentinel_failed"
+    if error_type == "image_generation_error" and isinstance(message, str):
+        lowered = message.lower()
+        if lowered.startswith(("prepare image conversation failed", "missing conduit_token")):
+            return "image_prepare_failed"
+        if lowered.startswith(("image conversation failed", "image generation error")):
+            return "image_conversation_failed"
+        if lowered.startswith(("get conversation failed", "image generation was rejected")):
+            return "image_poll_failed"
+    return fallback
 
 
 def validate_canary_url(url: str, target: str) -> str:
@@ -227,7 +280,16 @@ def http_request(
             response_headers = {key.lower(): value for key, value in response.headers.items()}
             return HttpResponse(response.status, response_headers, payload)
     except urllib.error.HTTPError as exc:
-        return HttpResponse(exc.code, {}, b"")
+        try:
+            error_body = exc.read(MAX_ERROR_BYTES + 1)
+        except (OSError, http.client.HTTPException):
+            error_body = b""
+        return HttpResponse(
+            exc.code,
+            {},
+            b"",
+            classify_http_error(exc.code, error_body),
+        )
     except TimeoutError as exc:
         raise ProbeError("timeout") from exc
     except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
@@ -238,6 +300,8 @@ def require_success(response: HttpResponse) -> HttpResponse:
     mapping = {401: "auth_failed", 403: "upstream_forbidden", 404: "route_missing", 429: "rate_limited"}
     if 200 <= response.status < 300:
         return response
+    if response.error_code is not None:
+        raise ProbeError(response.error_code)
     if response.status >= 500:
         raise ProbeError("upstream_failed")
     raise ProbeError(mapping.get(response.status, "http_failed"))
@@ -456,7 +520,9 @@ def _decode_image_payload(payload: dict[str, object]) -> tuple[bytes, str]:
     item = data[0]
     if "url" in item:
         raise ProbeError("image_url_not_accepted")
-    if set(item) != {"b64_json"}:
+    if set(item) not in ({"b64_json"}, {"b64_json", "revised_prompt"}):
+        raise ProbeError("image_payload_invalid")
+    if "revised_prompt" in item and not isinstance(item["revised_prompt"], str):
         raise ProbeError("image_payload_invalid")
     encoded = item.get("b64_json")
     if not isinstance(encoded, str):
@@ -489,7 +555,7 @@ def _check_image(
     reject_image: bytes | None = None,
 ) -> CheckResult:
     try:
-        response = require_success(transport(target, "POST", path, body=body, content_type=content_type))
+        response = require_success(transport(target, "POST", path, body=body, content_type=content_type, timeout=180))
         image, media_type = _decode_image_payload(decode_json(response))
         if reject_image is not None and image == reject_image:
             raise ProbeError("image_payload_invalid")
@@ -560,26 +626,90 @@ def _wav_data_size(audio: bytes) -> int:
 
 
 def validate_audio(audio: bytes, media_type: str) -> dict[str, object]:
-    if not isinstance(audio, bytes) or not audio or len(audio) > MAX_RESPONSE_BYTES or media_type != "audio/wav":
+    if not isinstance(audio, bytes) or not audio or len(audio) > MAX_RESPONSE_BYTES:
         raise ProbeError("audio_payload_invalid")
-    try:
-        data_size = _wav_data_size(audio)
-        with wave.open(io.BytesIO(audio), "rb") as source:
+    if media_type == "audio/wav":
+        try:
+            data_size = _wav_data_size(audio)
+            with wave.open(io.BytesIO(audio), "rb") as source:
+                if (
+                    source.getcomptype() != "NONE"
+                    or source.getnchannels() != 1
+                    or source.getsampwidth() != 2
+                    or source.getframerate() != 16000
+                    or source.getnframes() < 1
+                ):
+                    raise ProbeError("audio_payload_invalid")
+                expected_size = source.getnframes() * source.getnchannels() * source.getsampwidth()
+                frames = source.readframes(source.getnframes() + 1)
+                if expected_size != data_size or len(frames) != expected_size or source.readframes(1):
+                    raise ProbeError("audio_payload_invalid")
+        except (EOFError, wave.Error) as exc:
+            raise ProbeError("audio_payload_invalid") from exc
+    elif media_type == "audio/mpeg":
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            raise ProbeError("audio_payload_invalid")
+        try:
+            probe = subprocess.run(
+                [
+                    ffprobe,
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_type,codec_name,sample_rate,channels",
+                    "-of", "json",
+                    "pipe:0",
+                ],
+                input=audio,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProbeError("audio_payload_invalid") from exc
+        if probe.returncode != 0 or len(probe.stdout) > MAX_JSON_BYTES:
+            raise ProbeError("audio_payload_invalid")
+        try:
+            metadata = json.loads(probe.stdout.decode("utf-8"))
+            streams = metadata["streams"]
+            stream = streams[0]
             if (
-                source.getcomptype() != "NONE"
-                or source.getnchannels() != 1
-                or source.getsampwidth() != 2
-                or source.getframerate() != 16000
-                or source.getnframes() < 1
+                not isinstance(streams, list)
+                or not isinstance(stream, dict)
+                or stream.get("codec_type") != "audio"
+                or stream.get("codec_name") != "mp3"
+                or int(stream.get("sample_rate", 0)) < 1
+                or int(stream.get("channels", 0)) < 1
             ):
                 raise ProbeError("audio_payload_invalid")
-            expected_size = source.getnframes() * source.getnchannels() * source.getsampwidth()
-            frames = source.readframes(source.getnframes() + 1)
-            if expected_size != data_size or len(frames) != expected_size or source.readframes(1):
-                raise ProbeError("audio_payload_invalid")
-    except (EOFError, wave.Error) as exc:
-        raise ProbeError("audio_payload_invalid") from exc
+        except (KeyError, IndexError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ProbeError("audio_payload_invalid") from exc
+    else:
+        raise ProbeError("audio_payload_invalid")
     return {"bytes": len(audio), "media_type": media_type, "decodable": True}
+
+
+def read_audio_fixture(path: Path) -> bytes:
+    resolved = path.resolve(strict=False)
+    if any(part.lower() == ".secrets" for part in resolved.parts):
+        raise ProbeError("audio_fixture_invalid")
+    try:
+        metadata = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            raise ProbeError("audio_fixture_invalid")
+        if metadata.st_size < 1 or metadata.st_size > MAX_REQUEST_BYTES:
+            raise ProbeError("audio_fixture_invalid")
+        audio = path.read_bytes()
+    except FileNotFoundError as exc:
+        raise ProbeError("audio_fixture_unavailable") from exc
+    except OSError as exc:
+        raise ProbeError("audio_fixture_unavailable") from exc
+    try:
+        validate_audio(audio, "audio/wav")
+    except ProbeError as exc:
+        raise ProbeError("audio_fixture_invalid") from exc
+    return audio
 
 
 def extract_text_result(response: HttpResponse) -> str:
@@ -594,7 +724,7 @@ def extract_text_result(response: HttpResponse) -> str:
 
 def check_audio_speech(target: TargetConfig, transport: Transport = http_request) -> tuple[CheckResult, bytes | None]:
     body = json.dumps(
-        {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "wav"},
+        {"model": "tts-1", "input": "今天是能力测试。", "voice": "alloy", "response_format": "mp3"},
         ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")
     try:
@@ -620,11 +750,11 @@ def _check_audio_text(name: str, path: str, audio: bytes | None, *, fields: Mapp
 
 
 def check_audio_transcription(target: TargetConfig, audio: bytes | None, transport: Transport = http_request) -> CheckResult:
-    return _check_audio_text("audio_transcription", "/v1/audio/transcriptions", audio, fields={"model": "whisper-1", "language": "zh"}, expected=lambda text: "能力测试" in text, success_code="audio_transcription_valid", success_details={"text_present": True, "expected_marker_present": True}, failure_code="transcription_mismatch", target=target, transport=transport)
+    return _check_audio_text("audio_transcription", "/v1/audio/transcriptions", audio, fields={"model": "whisper-1", "language": "zh"}, expected=lambda text: "今天" in text and "能力" in text, success_code="audio_transcription_valid", success_details={"text_present": True, "expected_marker_present": True}, failure_code="transcription_mismatch", target=target, transport=transport)
 
 
 def check_audio_translation(target: TargetConfig, audio: bytes | None, transport: Transport = http_request) -> CheckResult:
-    return _check_audio_text("audio_translation", "/v1/audio/translations", audio, fields={"model": "whisper-1"}, expected=lambda text: "capability" in text.lower() and "test" in text.lower(), success_code="audio_translation_valid", success_details={"text_present": True, "english_markers_present": True}, failure_code="translation_mismatch", target=target, transport=transport)
+    return _check_audio_text("audio_translation", "/v1/audio/translations", audio, fields={"model": "whisper-1"}, expected=lambda text: "today" in text.casefold() and any(marker in text.casefold() for marker in ("capability", "ability")) and any(marker in text.casefold() for marker in ("test", "assessment", "evaluation")), success_code="audio_translation_valid", success_details={"text_present": True, "english_markers_present": True}, failure_code="translation_mismatch", target=target, transport=transport)
 
 
 def check_files(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
@@ -654,6 +784,41 @@ def check_files(target: TargetConfig, transport: Transport = http_request) -> Ch
         return CheckResult("files", "PASS", "files_valid", {"upload_accepted": True, "file_id_present": True, "answer_present": True})
     except ProbeError as exc:
         return _failure("files", "files_invalid", exc)
+
+
+def check_vision(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
+    try:
+        image_url = "data:image/png;base64," + base64.b64encode(make_test_png()).decode("ascii")
+        chat_body = _json_body({
+            "model": "gpt-5-6-pro",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": VISION_PROMPT},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]}],
+        })
+        chat = decode_json(require_success(transport(
+            target,
+            "POST",
+            "/v1/chat/completions",
+            body=chat_body,
+            content_type="application/json",
+        )))
+        choices = chat.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ProbeError("vision_invalid")
+        message = choices[0].get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise ProbeError("vision_invalid")
+        if message["content"].strip().upper() != "BLUE":
+            raise ProbeError("vision_invalid")
+        return CheckResult(
+            "vision",
+            "PASS",
+            "vision_valid",
+            {"image_uploaded": True, "image_understood": True},
+        )
+    except ProbeError as exc:
+        return _failure("vision", "vision_invalid", exc)
 
 
 def check_models(target: TargetConfig, transport: Transport = http_request) -> CheckResult:
@@ -791,10 +956,7 @@ def _validate_result(result: CheckResult) -> None:
             if value != PASS_MEDIA_TYPES_BY_CHECK.get(result.name):
                 raise ValueError("invalid result details")
         elif key == "dependency":
-            dependencies = {"direct"}
-            if result.name in {"audio_transcription", "audio_translation"}:
-                dependencies.add("audio_speech")
-            if value not in dependencies:
+            if value != "direct":
                 raise ValueError("invalid result details")
         elif not isinstance(value, bool) or not value:
             raise ValueError("invalid result details")
@@ -803,7 +965,7 @@ def _validate_result(result: CheckResult) -> None:
 def _validate_report(report: Mapping[str, object]) -> dict[str, object]:
     if set(report) != {"schema_version", "checked_at", "overall", "targets"}:
         raise ValueError("invalid report")
-    if report["schema_version"] != 1 or report["overall"] not in STATUS_ORDER:
+    if report["schema_version"] != 2 or report["overall"] not in STATUS_ORDER:
         raise ValueError("invalid report")
     checked_at = report["checked_at"]
     if not isinstance(checked_at, str) or not checked_at.endswith("Z"):
@@ -839,7 +1001,7 @@ def _validate_report(report: Mapping[str, object]) -> dict[str, object]:
     if report["overall"] != expected_overall:
         raise ValueError("invalid report")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "checked_at": checked_at,
         "overall": expected_overall,
         "targets": sanitized_targets,
@@ -859,7 +1021,7 @@ def build_report(
     if timestamp.tzinfo is None:
         raise ValueError("checked_at must be timezone-aware")
     return _validate_report({
-        "schema_version": 1,
+        "schema_version": 2,
         "checked_at": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "overall": "PASS" if all(result.status == "PASS" for results in targets.values() for result in results) else "FAIL",
         "targets": {name: [asdict(result) for result in results] for name, results in targets.items()},
@@ -876,8 +1038,10 @@ def serialize_report(report: Mapping[str, object]) -> str:
 def run_target(
     target: TargetConfig,
     transport: Transport = http_request,
+    *,
+    audio_fixture: bytes | None = None,
 ) -> list[CheckResult]:
-    """Run EXPECTED_CHECKS in order; audio children depend on audio_speech."""
+    """Run EXPECTED_CHECKS in order with an optional independent audio fixture."""
     results = [
         check_models(target, transport),
         check_chat_nonstream(target, transport),
@@ -885,24 +1049,26 @@ def run_target(
         check_responses_nonstream(target, transport),
         check_responses_stream(target, transport),
         check_files(target, transport),
+        check_vision(target, transport),
         check_image_generation(target, transport),
         check_image_edit(target, transport),
         check_image_variation(target, transport),
     ]
     speech, audio = check_audio_speech(target, transport)
     results.append(speech)
-    if audio is None:
+    source_audio = audio_fixture if audio_fixture is not None else audio
+    if source_audio is None:
         results.extend(
             [
-                CheckResult("audio_transcription", "FAIL", "dependency_failed", {"dependency": "audio_speech"}),
-                CheckResult("audio_translation", "FAIL", "dependency_failed", {"dependency": "audio_speech"}),
+                CheckResult("audio_transcription", "FAIL", "audio_fixture_unavailable", {}),
+                CheckResult("audio_translation", "FAIL", "audio_fixture_unavailable", {}),
             ]
         )
     else:
         results.extend(
             [
-                check_audio_transcription(target, audio, transport),
-                check_audio_translation(target, audio, transport),
+                check_audio_transcription(target, source_audio, transport),
+                check_audio_translation(target, source_audio, transport),
             ]
         )
     if tuple(item.name for item in results) != EXPECTED_CHECKS:
@@ -923,8 +1089,9 @@ def run_matrix(
     *,
     target_mode: str,
     transport: Transport = http_request,
+    audio_fixture: bytes | None = None,
 ) -> dict[str, list[CheckResult]]:
-    direct_results = run_target(direct, transport)
+    direct_results = run_target(direct, transport, audio_fixture=audio_fixture)
     results = {"direct": direct_results}
     if target_mode == "direct":
         return results
@@ -933,7 +1100,7 @@ def run_matrix(
     if any(item.status != "PASS" for item in direct_results):
         results["gateway"] = _dependency_failed_results("direct")
         return results
-    results["gateway"] = run_target(gateway, transport)
+    results["gateway"] = run_target(gateway, transport, audio_fixture=audio_fixture)
     return results
 
 
@@ -1010,6 +1177,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path(".secrets/canary/new_api_client_token.txt"),
     )
+    parser.add_argument("--audio-fixture", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
@@ -1021,12 +1189,17 @@ def main(argv: list[str] | None = None) -> int:
         print("aurora_canary=ERROR code=real_api_not_authorized", file=sys.stderr)
         return 2
     try:
+        audio_fixture = (
+            read_audio_fixture(args.audio_fixture)
+            if args.audio_fixture is not None
+            else None
+        )
         direct = TargetConfig(
             "direct",
             DIRECT_BASE_URL,
             read_env_value(args.env_file, "AURORA_CANARY_AUTHORIZATION"),
         )
-        direct_results = run_target(direct)
+        direct_results = run_target(direct, audio_fixture=audio_fixture)
         targets: dict[str, list[CheckResult]] = {"direct": direct_results}
         if args.target == "both":
             if any(result.status != "PASS" for result in direct_results):
@@ -1035,7 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
                 gateway = TargetConfig(
                     "gateway", GATEWAY_BASE_URL, read_single_secret(args.gateway_key_file)
                 )
-                targets["gateway"] = run_target(gateway)
+                targets["gateway"] = run_target(gateway, audio_fixture=audio_fixture)
         report = build_report(targets)
         payload = serialize_report(report)
         if args.output is not None:
