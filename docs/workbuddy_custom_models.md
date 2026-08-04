@@ -46,17 +46,21 @@
 
 `gpt-5-6-thinking` 不会向第三方客户端返回可见的 `reasoning_content`。思考档表示答案质量更高，不表示可以查看思维链。
 
-## 5. 图片生成当前不可用
+## 5. 图片生成仍隐藏，语音能力仅供 API 调用
 
 `gpt-image-2` 已从当前 New API 渠道、默认令牌模型范围和 abilities 中隐藏，因此不会出现在鉴权后的 `GET /v1/models` 结果中。只有在 Aurora 升级后的受控复测期间才临时重新注册。
 
-仓库已准备 New API rc.23 目标升级，但尚不能据此把图片或其他多模态能力写入
-WorkBuddy 正式配置。只有生产 New API 入口的图片生成/编辑/变体真实请求返回可解码
-图片后，才保留 `gpt-image-2`；TTS、语音转写和音频翻译同样按逐项探针结果开放。
+2026-08-04 已完成 New API rc.23 生产升级和一次 14 项真实矩阵。图片生成和编辑
+通过，但图片变体失败，因此 passed-only 门禁仍隐藏整个 `gpt-image-2`。`gpt-4o`
+因流式、Files 和组合翻译失败而隐藏；`tts-1` 因媒体完整性失败而隐藏。
 
-完成注册后，New API 的渠道模型测试可能把 `gpt-image-2` 显示为成功，但这不是出图验收。2026-07-27 的真实 `/v1/images/generations` 请求仍返回 HTTP 403 和 `sentinel prepare failed`，没有 `data[].url` 或 `data[].b64_json`。这是当前 Aurora 与 ChatGPT 图像后端 sentinel 流程之间的兼容问题，不能通过 WorkBuddy 模型开关解决。
+New API 的渠道模型测试可能把 `gpt-image-2` 显示为成功，但这不是完整出图验收。当前限制来自图片端点之间的能力不一致，不能通过 WorkBuddy 模型开关解决。
 
 WorkBuddy 的 `supportsImages: true` 只表示支持图片输入和看图，不表示这个端点能够生成图片。需要出图时使用 WorkBuddy 自身可用的图片生成能力。
+
+`whisper-1` 是本轮唯一新增并保留的模型：生产入口已验证音频转写和原生翻译为英文。
+它是 `/v1/audio/transcriptions` 与 `/v1/audio/translations` 的 API 模型，不是 WorkBuddy
+聊天模型，不应加入下面的 `models.json`。英文音频转中文组合链路尚未通过。
 
 ## 6. 网页搜索可以使用
 

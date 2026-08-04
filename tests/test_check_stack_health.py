@@ -672,17 +672,22 @@ class StrictHttpTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
-    def test_exact_models_pass(self):
+    def test_exact_retained_models_pass(self):
         request = mock.Mock(
             return_value={
                 "data": [
                     {"id": "gpt-5-6-thinking"},
                     {"id": "gpt-5-6-pro"},
+                    {"id": "whisper-1"},
                 ]
             }
         )
         result = MODULE.check_models("client-secret", request)
         self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            result.summary,
+            "模型范围严格等于 pro、thinking、whisper",
+        )
 
     def test_extra_or_missing_model_fails(self):
         request = mock.Mock(

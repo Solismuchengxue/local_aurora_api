@@ -30,7 +30,7 @@ CHECK_LABELS = {
     "chat": "聊天",
 }
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
-EXPECTED_MODELS = {"gpt-5-6-pro", "gpt-5-6-thinking"}
+EXPECTED_MODELS = {"gpt-5-6-pro", "gpt-5-6-thinking", "whisper-1"}
 NEW_API_BASE = "http://127.0.0.1:3000"
 FINAL_AURORA_BASE_URL = "http://aurora:8080"
 CONTAINER_INSPECT_FORMAT = (
@@ -338,7 +338,7 @@ def check_models(
             "models",
             "PASS" if healthy else "FAIL",
             (
-                "模型范围严格等于 pro、thinking"
+                "模型范围严格等于 pro、thinking、whisper"
                 if healthy
                 else "模型范围与正式配置不一致"
             ),

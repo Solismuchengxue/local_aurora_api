@@ -1,6 +1,6 @@
 # 飞牛 fnOS 部署指南：aurora + new-api 反向代理 ChatGPT Web 为 OpenAI 兼容 API
 
-> 本文档记录唯一正式部署。2026-08-04 已批准把 Aurora 2.5.0 Session Token 方案提升为生产目标；在 FNOS checkout、容器、渠道和清理验收全部完成前，文中“最终架构”不得被理解为现场已完成。
+> 本文档记录唯一正式部署。2026-08-04 已完成 Aurora 2.5.0 Session Token 唯一生产切换和 New API rc.23 升级；旧 Aurora 与 canary 已清理，rc.21 镜像及已验证 New API 升级备份继续保留，等待独立清理授权。
 > 目标：把 **ChatGPT Web** 转成通用 **OpenAI 兼容 API**，供任意客户端（OpenAI SDK、Cherry Studio、LobeChat 等）调用，主用模型 `gpt-5-6-pro`。
 > 项目共享名称和 FNOS 当前运行目录均为 `Solis_Aurora_Gateway`；用户 cron 也已使用 `/vol1/1000/Solis_Aurora_Gateway`。历史目录 `/vol1/1000/local_aurora_api` 已在最终备份、观察和退役门禁通过后删除。
 > 脱敏健康状态生产器、生产 cron、Studio OS 专用只读子挂载和 n8n 工作流导入已于 2026-08-02 完成；合成异常邮件与真实 `PASS` 静默路径均已验证，工作流随后通过最终门禁并正式发布、激活。
@@ -31,7 +31,7 @@ ChatGPT (api.openai.com / chatgpt.com)
 - **metacubexd** (:9097)：mihomo 官方开源 Web 面板，可视化管理节点/分组/流量。
 - **watchcow**（飞牛应用）：把 new-api / metacubexd 变成飞牛桌面图标（可选增强，推荐 GUI 手动配置）。
 
-**关键特性**：mihomo 是**应用级代理**（无 TUN 模式），只有显式配 `http_proxy` 的 aurora 走它；按当前网络设计，它不接管飞牛系统和 IPv6 DDNS 流量。
+**关键特性**：mihomo 是**应用级代理**（无 TUN 模式）；aurora 通过 Compose 网络显式使用它，Docker daemon 另通过宿主机 `127.0.0.1:7897` 回环映射只代理镜像仓库操作。它不接管飞牛系统和 IPv6 DDNS 流量。
 
 ---
 
@@ -61,7 +61,7 @@ ChatGPT (api.openai.com / chatgpt.com)
 
 > ⚠️ 镜像源 / 代理仅用于拉取，**不要当作运行时出网方式**。本栈的 ChatGPT 出网走的是 mihomo（见 §0），与镜像源无关。
 
-仓库中的 Compose 不使用会随上游发布漂移的 `latest`。Aurora、Mihomo 和 MetaCubeXD 仍使用 NAS 已验证的不可变 digest；New API 已固定到待现场验收的官方 `v1.0.0-rc.23` manifest `sha256:bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695`。升级时一次只修改一个服务的 digest；先备份其完整持久化数据，再执行拉取、重建和完整验证。
+仓库中的 Compose 不使用会随上游发布漂移的 `latest`。Aurora、Mihomo、MetaCubeXD 和 New API 均使用 NAS 已验证的不可变 digest；New API 正式基线为官方 `v1.0.0-rc.23` manifest `sha256:bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695`。升级时一次只修改一个服务的 digest；先备份其完整持久化数据，再执行拉取、重建和完整验证。
 
 ---
 
@@ -248,13 +248,12 @@ curl http://NAS_IP:3000/v1/chat/completions \
 
 #### New API rc.23 升级与多模态门禁
 
-仓库目标从 rc.21 升到 rc.23。该范围包含认证 Session、AuthFlow、渠道、Token、
-模型和 relay 层迁移，因此必须停止 New API 后冷备份整个 `data/new-api/`。若登录、
-SQLite、渠道或核心聊天门禁失败，必须同时恢复 rc.21 digest 与完整冷备份；只回退
-镜像可能留下不兼容的数据状态。
+2026-08-04 已把唯一生产 New API 从 rc.21 升级到 rc.23。升级前停止 New API 并
+冷备份整个 `data/new-api/`，随后完成 SQLite 迁移、登录、渠道、核心聊天和容器门禁；
+未触发回退。rc.21 镜像与完整冷备份继续保留，后续清理需要独立授权。
 
-核心门禁通过后，才能临时把 `gpt-4o`、`gpt-image-2`、`tts-1`、`whisper-1`
-加入渠道、默认 Token 和 ability，然后从 FNOS 执行一次：
+多模态验收曾临时把 `gpt-4o`、`gpt-image-2`、`tts-1`、`whisper-1` 加入渠道、
+默认 Token 和 ability，并从 FNOS 仅执行一次以下零重试矩阵：
 
 ```bash
 python3 scripts/new_api_multimodal_probe.py \
@@ -269,7 +268,11 @@ Token，并使用合成、非敏感、大小受限的图片和音频输入。报
 响应正文、图片、音频、base64、签名 URL 或原始错误。图片、TTS、语音和组合翻译
 必须返回有效结构或可解码媒体才算 PASS；原生音频翻译未返回英文时继续隐藏。
 
-以上均为目标升级步骤；在 FNOS 现场完成前，不得写成 rc.23 已部署或多模态已开放。
+实际结果为 8 PASS、6 FAIL。模型列表、非流式 Chat、非流式 Responses、视觉、图片
+生成、图片编辑、音频转写和原生翻译为英文通过；Chat/Responses 流式、Files、图片
+变体、TTS 媒体和英文音频转中文组合链路失败。按 passed-only 规则，仅保留完整通过
+的 `whisper-1`，最终渠道、默认 Token 和 abilities 严格等于 `gpt-5-6-pro`、
+`gpt-5-6-thinking`、`whisper-1`。临时报告已校验后删除。
 
 以下结论来自 2026-07-26 使用 curl/Python 对 NAS 活端点的实际调用。它们描述的是当时运行中的 Aurora 构建，而不是根据上游文档推断。
 
@@ -282,14 +285,21 @@ Token，并使用合成、非敏感、大小受限的图片和音频输入。报
 
 因此，当前正式用法是切换模型，不在 New API 参数覆盖或请求体中强塞 effort 参数。
 
-#### 图片生成：当前不可用
+#### 图片生成：生产入口通过部分能力，但正式隐藏
 
-- Aurora 文档虽然提供 `/v1/images/generations` 和 `gpt-image-2`，但当前正式配置已从渠道模型列表、默认令牌模型范围和 abilities 中隐藏该模型；鉴权后的 `GET /v1/models` 只应列出两个聊天模型。
+- 2026-08-04 经 rc.23 生产 New API 入口，`gpt-image-2` 图片生成和编辑返回了可解码图片，但图片变体在进入渠道前被模型范围拒绝。
+- passed-only 门禁按模型而不是按单个端点收敛，因此当前正式配置已从渠道模型列表、默认令牌模型范围和 abilities 中隐藏 `gpt-image-2`；鉴权后的 `GET /v1/models` 只应列出 pro、thinking、whisper 三项。
 - New API 的“测试全部模型”可以把 `gpt-image-2` 显示为成功并给出响应时间；这只说明渠道测试完成，不能证明返回了图片。
-- 2026-07-27 经 New API 实际调用 `POST /v1/images/generations`，请求 `gpt-image-2`、`1024x1024` 和 `b64_json`，结果为 HTTP 403、`sentinel prepare failed`，响应没有图片数据，也没有生成文件。
-- 失败发生在 ChatGPT 图像生成的 sentinel 准备阶段，不是 New API 的 `model_not_found`。
+- 2026-07-27 的旧 Aurora 曾在图片生成 sentinel 准备阶段失败；该历史现象已被后续生成/编辑成功取代，但不能覆盖 2026-08-04 图片变体仍失败的事实。
 
-当前部署不得把图片生成功能标记为可用。验收必须以真实图片端点返回非空 `data[].url` 或 `data[].b64_json` 为准，不能使用渠道测试绿灯代替。Aurora 升级后的受控复测可以临时重新注册该模型，失败后应再次隐藏。WorkBuddy 的 `supportsImages` 表示图片输入/看图，不代表该端点能够生成图片。
+当前部署不得把图片生成功能标记为正式可用。未来只有在图片生成、编辑和变体全部通过新的受控门禁后，才可重新保留该模型。WorkBuddy 的 `supportsImages` 表示图片输入/看图，不代表该端点能够生成图片。
+
+#### 音频：转写与翻译为英文可用
+
+- `whisper-1` 的 `/v1/audio/transcriptions` 已返回合法转写结构。
+- `whisper-1` 的 `/v1/audio/translations` 已返回稳定英文标记；该 OpenAI 兼容端点的语义是把音频翻译成英文，不接受“目标语言为中文”的参数。
+- `tts-1` 虽到达 Aurora 渠道，但返回媒体未通过 MP3 codec、采样率、声道和时长验收，因此继续隐藏。
+- 英文音频先转写再交给 `gpt-4o` 翻译为中文的组合链路发生语义不匹配；`gpt-4o` 同时还有流式和 Files 失败，故未纳入正式模型范围。
 
 #### 网页搜索：模型原生联网可用
 
@@ -408,7 +418,7 @@ python3 scripts/check_stack_health.py \
     {"name": "database", "status": "PASS", "summary": "数据库完整，正式 Aurora 渠道与服务密钥一致", "details": {"integrity": "ok", "channel_base_matches": true, "service_key_matches": true}},
     {"name": "refresh_log", "status": "PASS", "summary": "Access Token 由 Aurora 内部自然续期，外部刷新日志不适用", "details": {"mode": "aurora_internal", "external_refresh": "not_applicable"}},
     {"name": "mihomo", "status": "PASS", "summary": "GLOBAL / SG / Singapore Node", "details": {"mode": "GLOBAL", "selected": "Singapore Node", "country": "SG"}},
-    {"name": "models", "status": "PASS", "summary": "模型范围严格等于 pro、thinking", "details": {"model_ids": ["gpt-5-6-pro", "gpt-5-6-thinking"]}},
+    {"name": "models", "status": "PASS", "summary": "模型范围严格等于 pro、thinking、whisper", "details": {"model_ids": ["gpt-5-6-pro", "gpt-5-6-thinking", "whisper-1"]}},
     {"name": "chat", "status": "PASS", "summary": "pro 返回结构合法的非空 completion", "details": {"model": "gpt-5-6-pro", "content_empty": false, "fallback_used": false}}
   ]
 }
@@ -420,7 +430,7 @@ python3 scripts/check_stack_health.py \
 - New API SQLite 完整性、正式渠道地址、服务密钥一致性和可用客户端令牌；
 - Aurora 内建自然续期模式，外部刷新日志固定为不适用；
 - Mihomo GLOBAL 模式、当前节点和经代理确认的 `SG` 出口；
-- 对外模型严格等于 `gpt-5-6-pro`、`gpt-5-6-thinking`；
+- 对外模型严格等于 `gpt-5-6-pro`、`gpt-5-6-thinking`、`whisper-1`；
 - 一次真实 New API 聊天请求及 OpenAI completion 结构。
 
 只有通过或警告时退出码为 `0`；任一失败项使退出码为 `1`。合法 HTTP 200 空 completion 会显示警告，但不会被误判为鉴权失败。
@@ -466,17 +476,19 @@ python3 scripts/write_n8n_health_status.py \
 
 Aurora 是状态权威，Studio OS/n8n 只能消费，不能通过该链路修改 Aurora。文件型状态生产、挂载、读取和校验不新增或复用 Credential；现有 SMTP Credential 只属于异常通知。`latest.json` 会随 Studio OS `data/` 进入本地恢复包和加密云备份，因此内容不得包含 Token、连接串、邮箱、Cookie、敏感路径、业务正文、原始日志/命令输出，也不得扩展为无界历史。
 
+2026-08-04 在 New API 模型范围最终收敛后再次手工运行生产器，Schema v1 的 containers、runtime_contract、local_tcp、database、refresh_log 五项均为 `PASS`。发布后的单一 `latest.json` 保持 0600 和 16 KiB 上限，n8n 专用子挂载继续为 `RW=false`；本次没有执行模型请求、工作流或邮件节点。
+
 ### 11.4 mihomo 保持 GLOBAL 模式
 
 在 Mihomo WebUI 中确认出站模式为 `GLOBAL`、GLOBAL 首选节点为新加坡解锁节点（见 §6.1）。切换到 `rule` 可能让 Aurora 改走其他节点。每次更新订阅后重新确认模式和节点选择。
 
 ### 11.5 不影响飞牛 IPv6 DDNS
 
-当前设计不启用 Mihomo TUN，并且只有 Aurora 配置 `http_proxy`，因此不会主动接管飞牛系统路由。部署后仍应实际验证 IPv6 DDNS 和防火墙行为。
+当前设计不启用 Mihomo TUN；Aurora 仅配置应用级 `http_proxy`，Docker daemon 仅配置镜像仓库代理，因此不会主动接管飞牛系统路由。部署后仍应实际验证 IPv6 DDNS 和防火墙行为。
 
 ### 11.6 Mihomo 端口边界
 
-Mihomo 的 `7890` 代理端口不发布到 NAS，只供 Compose 网络内的 Aurora 使用。`9090` 控制端口没有默认认证，但只绑定 `.env` 中的 `NAS_LAN_IP`，不会监听 NAS 的 IPv6 地址或其他 IPv4 网卡。
+Mihomo 的 `7890` 代理端口不向局域网发布：Compose 网络内的 Aurora 直接使用，Docker daemon 只通过宿主机 `127.0.0.1:7897` 回环映射使用。`9090` 控制端口没有默认认证，但只绑定 `.env` 中的 `NAS_LAN_IP`，不会监听 NAS 的 IPv6 地址或其他 IPv4 网卡。
 
 这项绑定不能替代边界防火墙：仍应确认路由器没有把 `9090` 转发到公网，并避免把 `NAS_LAN_IP` 设置成 `0.0.0.0`。
 
