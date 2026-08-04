@@ -141,6 +141,45 @@ class DocumentTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             MODULE.build_document(results, datetime.now(timezone.utc))
+
+    def test_service_key_database_shape_is_strictly_code_specific(self):
+        service_details = {
+            "integrity_ok": True,
+            "channel_active": True,
+            "channel_base_matches": True,
+            "service_key_matches": True,
+        }
+        results = make_results()
+        results["database"] = MODULE.CheckResult(
+            "PASS", "database_and_service_key_valid", service_details
+        )
+        document = MODULE.build_document(results, datetime.now(timezone.utc))
+        self.assertEqual(
+            document["checks"]["database"],
+            {
+                "status": "PASS",
+                "code": "database_and_service_key_valid",
+                "details": service_details,
+            },
+        )
+
+        results["database"] = MODULE.CheckResult(
+            "PASS", "database_and_token_valid", service_details
+        )
+        with self.assertRaises(ValueError):
+            MODULE.build_document(results, datetime.now(timezone.utc))
+
+        results["database"] = MODULE.CheckResult(
+            "PASS",
+            "database_and_service_key_valid",
+            {
+                "integrity_ok": True,
+                "remaining_seconds": 604800,
+                "expires_at": "2026-08-08T09:12:00Z",
+            },
+        )
+        with self.assertRaises(ValueError):
+            MODULE.build_document(results, datetime.now(timezone.utc))
         results = make_results()
         results["local_tcp"] = MODULE.CheckResult(
             "PASS",
@@ -415,10 +454,11 @@ class DatabaseCheckTests(unittest.TestCase):
             connection = sqlite3.connect(database)
             try:
                 connection.execute(
-                    "CREATE TABLE channels (id INTEGER PRIMARY KEY, status INTEGER, key TEXT)"
+                    "CREATE TABLE channels (id INTEGER PRIMARY KEY, status INTEGER, key TEXT, base_url TEXT)"
                 )
                 connection.execute(
-                    "INSERT INTO channels VALUES (1, 1, ?)", (make_token(500000),)
+                    "INSERT INTO channels VALUES (1, 1, ?, ?)",
+                    (make_token(500000), "http://aurora:8080"),
                 )
                 connection.commit()
             finally:
@@ -428,6 +468,89 @@ class DatabaseCheckTests(unittest.TestCase):
                 MODULE.check_database(root, 1, 496500).code, "token_near_expiry"
             )
             self.assertEqual(MODULE.check_database(root, 1, 500000).status, "FAIL")
+
+    def test_service_key_channel_passes_with_only_sanitized_booleans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "data" / "new-api" / "one-api.db"
+            database.parent.mkdir(parents=True)
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "CREATE TABLE channels (id INTEGER PRIMARY KEY, status INTEGER, key TEXT, base_url TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO channels VALUES (1, 1, ?, ?)",
+                    (
+                        "service-key-value",
+                        "http://aurora-session-renewal-canary:8080",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            (root / ".env.canary").write_text(
+                "AURORA_CANARY_AUTHORIZATION=service-key-value\n",
+                encoding="utf-8",
+            )
+
+            result = MODULE.check_database(root, 1, 100000)
+
+        self.assertEqual(
+            (result.status, result.code),
+            ("PASS", "database_and_service_key_valid"),
+        )
+        self.assertEqual(
+            result.details,
+            {
+                "integrity_ok": True,
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": True,
+            },
+        )
+        self.assertNotIn("service-key-value", json.dumps(result.details))
+
+    def test_service_key_mismatch_is_sanitized_database_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "data" / "new-api" / "one-api.db"
+            database.parent.mkdir(parents=True)
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "CREATE TABLE channels (id INTEGER PRIMARY KEY, status INTEGER, key TEXT, base_url TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO channels VALUES (1, 1, ?, ?)",
+                    (
+                        "database-service-key",
+                        "http://aurora-session-renewal-canary:8080",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            (root / ".env.canary").write_text(
+                "AURORA_CANARY_AUTHORIZATION=different-service-key\n",
+                encoding="utf-8",
+            )
+
+            result = MODULE.check_database(root, 1, 100000)
+
+        self.assertEqual((result.status, result.code), ("FAIL", "database_invalid"))
+        self.assertEqual(
+            result.details,
+            {
+                "integrity_ok": True,
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": False,
+            },
+        )
+        rendered = json.dumps(result.details)
+        self.assertNotIn("database-service-key", rendered)
+        self.assertNotIn("different-service-key", rendered)
 
     def test_invalid_database_is_sanitized(self):
         with tempfile.TemporaryDirectory() as directory:

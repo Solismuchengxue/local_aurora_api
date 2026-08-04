@@ -5,6 +5,7 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import base64
+import hmac
 import ipaddress
 import json
 import os
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 from typing import Callable, Sequence
+
+from aurora_session_renewal_probe import read_env_value
 
 try:
     from refresh_chatgpt_access_token import RefreshError, jwt_exp
@@ -63,6 +66,7 @@ ALLOWED_CODES = {
     },
     "database": {
         "database_and_token_valid",
+        "database_and_service_key_valid",
         "token_near_expiry",
         "token_expired",
         "database_invalid",
@@ -88,6 +92,7 @@ EXPECTED_STATUS_BY_CODE = {
     "local_port_unreachable": "FAIL",
     "tcp_target_unavailable": "FAIL",
     "database_and_token_valid": "PASS",
+    "database_and_service_key_valid": "PASS",
     "token_near_expiry": "WARN",
     "token_expired": "FAIL",
     "database_invalid": "FAIL",
@@ -104,6 +109,7 @@ PRODUCER = "Solis_Aurora_Gateway"
 MAX_STATUS_BYTES = 16 * 1024
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
 EXPECTED_ROOT = "/vol1/1000/Solis_Aurora_Gateway"
+SESSION_CANARY_BASE_URL = "http://aurora-session-renewal-canary:8080"
 
 CommandRunner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 TcpConnector = Callable[[tuple[str, int], float], object]
@@ -171,7 +177,9 @@ def _valid_nonnegative_integer(value: object) -> bool:
     return type(value) is int and value >= 0
 
 
-def _validate_details(name: str, details: dict[str, object]) -> None:
+def _validate_details(
+    name: str, code: str, details: dict[str, object]
+) -> None:
     if type(details) is not dict:
         raise ValueError("invalid check details")
     if name == "containers":
@@ -207,13 +215,35 @@ def _validate_details(name: str, details: dict[str, object]) -> None:
             and all(type(value) is bool for value in services.values())
         )
     elif name == "database":
-        if set(details) != {"integrity_ok", "remaining_seconds", "expires_at"}:
-            raise ValueError("invalid check details")
-        valid = (
-            type(details["integrity_ok"]) is bool
-            and type(details["remaining_seconds"]) is int
-            and _valid_utc_text(details["expires_at"])
-        )
+        service_keys = {
+            "integrity_ok",
+            "channel_active",
+            "channel_base_matches",
+            "service_key_matches",
+        }
+        if code == "database_and_service_key_valid":
+            valid = (
+                set(details) == service_keys
+                and all(type(value) is bool for value in details.values())
+                and all(details.values())
+            )
+        elif code == "database_invalid" and set(details) == service_keys:
+            valid = (
+                all(type(value) is bool for value in details.values())
+                and not all(details.values())
+            )
+        else:
+            if set(details) != {
+                "integrity_ok",
+                "remaining_seconds",
+                "expires_at",
+            }:
+                raise ValueError("invalid check details")
+            valid = (
+                type(details["integrity_ok"]) is bool
+                and type(details["remaining_seconds"]) is int
+                and _valid_utc_text(details["expires_at"])
+            )
     elif name == "refresh_log":
         if set(details) != {
             "event",
@@ -256,7 +286,7 @@ def build_document(
             raise ValueError("invalid check code")
         if result.status != EXPECTED_STATUS_BY_CODE[result.code]:
             raise ValueError("invalid check status")
-        _validate_details(name, result.details)
+        _validate_details(name, result.code, result.details)
     return {
         "schema_version": SCHEMA_VERSION,
         "producer": PRODUCER,
@@ -551,14 +581,51 @@ def check_database(root: Path, channel_id: int, now_epoch: int) -> CheckResult:
                 "ok",
             )
             channel = database.execute(
-                "SELECT key FROM channels WHERE id = ? AND status = 1",
+                "SELECT status, key, base_url FROM channels WHERE id = ?",
                 (channel_id,),
             ).fetchone()
         finally:
             database.close()
-        if not integrity_ok or channel is None or not isinstance(channel[0], str):
+        if channel is not None and len(channel) == 3:
+            active = channel[0] == 1
+            channel_key = channel[1]
+            channel_base = channel[2]
+            expected_service_key = None
+            try:
+                expected_service_key = read_env_value(
+                    root / ".env.canary", "AURORA_CANARY_AUTHORIZATION"
+                )
+            except (OSError, ValueError):
+                pass
+            service_key_matches = (
+                isinstance(channel_key, str)
+                and isinstance(expected_service_key, str)
+                and hmac.compare_digest(channel_key, expected_service_key)
+            )
+            service_mode = (
+                channel_base == SESSION_CANARY_BASE_URL or service_key_matches
+            )
+            if service_mode:
+                details = {
+                    "integrity_ok": integrity_ok,
+                    "channel_active": active,
+                    "channel_base_matches": channel_base == SESSION_CANARY_BASE_URL,
+                    "service_key_matches": service_key_matches,
+                }
+                healthy = all(details.values())
+                return CheckResult(
+                    "PASS" if healthy else "FAIL",
+                    "database_and_service_key_valid" if healthy else "database_invalid",
+                    details,
+                )
+        if (
+            not integrity_ok
+            or channel is None
+            or channel[0] != 1
+            or not isinstance(channel[1], str)
+        ):
             raise ValueError("database state invalid")
-        expires_epoch = jwt_exp(channel[0])
+        expires_epoch = jwt_exp(channel[1])
         remaining = expires_epoch - now_epoch
         details = {
             "integrity_ok": True,
