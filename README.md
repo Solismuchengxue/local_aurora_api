@@ -91,6 +91,15 @@ python3 scripts/check_stack_health.py
 
 ## 已实测能力
 
+仓库中的 New API 已固定到官方 `v1.0.0-rc.23` 目标 digest，但这不表示 FNOS
+已经升级。`rc.21 → rc.23` 涉及认证 Session、AuthFlow、渠道、Token、模型和 relay
+层迁移；部署前必须停止 New API，冷备份完整 `data/new-api/`，失败时同时恢复旧
+digest 与完整数据，不能只回退镜像。
+
+`gpt-4o`、`gpt-image-2`、`tts-1` 和 `whisper-1` 只有通过生产 New API 入口的
+真实端到端探针后才允许加入正式渠道、默认 Token 与 ability。渠道测试绿灯、路由
+存在或 Aurora 直连结果均不能代替验收；尚未通过的能力继续隐藏。
+
 以下结论来自 2026-07-26 对 NAS 活端点的实际调用：
 
 | 能力 | 状态 | 使用方式 |
@@ -111,4 +120,4 @@ python3 scripts/check_stack_health.py
 - 模型联网搜索的引用标记偶有乱码或截断。
 - `7890` 只供 Compose 内部的 Aurora 使用，不发布到 NAS；`9090` 仅绑定 `.env` 指定的局域网 IPv4 地址。
 - `backups/` 只保存本地备份，备份正文不进入 Git；项目级备份必须排除该目录。
-- 四个第三方容器镜像固定到 NAS 已验证运行的 digest；升级前应检查上游变更、备份 `data/`，并逐个服务更新和验证。
+- Aurora、Mihomo 和 MetaCubeXD 固定到 NAS 已验证运行的 digest；New API 当前 Compose 使用待现场验收的 rc.23 固定 digest。升级前应检查上游变更、完整备份对应 `data/`，并逐个服务更新和验证。

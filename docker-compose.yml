@@ -34,8 +34,8 @@ services:
     restart: unless-stopped
 
   new-api:
-    # 2026-07-27 NAS 已验证基线：v1.0.0-rc.21
-    image: calciumion/new-api@sha256:428018a37c0b26c163a3367c18401161707cd0e08d0f26a3dde9ff0caa05e34c
+    # 2026-08-04 目标基线：v1.0.0-rc.23
+    image: calciumion/new-api@sha256:bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695
     container_name: new-api
     ports:
       - "3000:3000"

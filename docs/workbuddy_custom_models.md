@@ -50,6 +50,10 @@
 
 `gpt-image-2` 已从当前 New API 渠道、默认令牌模型范围和 abilities 中隐藏，因此不会出现在鉴权后的 `GET /v1/models` 结果中。只有在 Aurora 升级后的受控复测期间才临时重新注册。
 
+仓库已准备 New API rc.23 目标升级，但尚不能据此把图片或其他多模态能力写入
+WorkBuddy 正式配置。只有生产 New API 入口的图片生成/编辑/变体真实请求返回可解码
+图片后，才保留 `gpt-image-2`；TTS、语音转写和音频翻译同样按逐项探针结果开放。
+
 完成注册后，New API 的渠道模型测试可能把 `gpt-image-2` 显示为成功，但这不是出图验收。2026-07-27 的真实 `/v1/images/generations` 请求仍返回 HTTP 403 和 `sentinel prepare failed`，没有 `data[].url` 或 `data[].b64_json`。这是当前 Aurora 与 ChatGPT 图像后端 sentinel 流程之间的兼容问题，不能通过 WorkBuddy 模型开关解决。
 
 WorkBuddy 的 `supportsImages: true` 只表示支持图片输入和看图，不表示这个端点能够生成图片。需要出图时使用 WorkBuddy 自身可用的图片生成能力。

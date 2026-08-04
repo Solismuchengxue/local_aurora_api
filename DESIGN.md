@@ -65,6 +65,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - `data/mihomo/` 会被订阅更新和 WebUI 修改。
 - `data/new-api/` 包含 New API 数据库。
 - 修改或清理 `data/` 前必须先备份；不得把真实运行数据复制进共享配置。
+- New API `rc.21 → rc.23` 会执行数据库迁移；必须停止 New API 后冷备份整个 `data/new-api/`。核心门禁失败时同时恢复 rc.21 digest 与完整冷备份，禁止仅回退镜像。
 
 ### 网络
 
@@ -80,10 +81,12 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - `gpt-5-6-thinking` 不向第三方客户端返回可见的 `reasoning_content`，不能把思考档描述成可查看思维链。
 - `gpt-5-6-pro` 和 `gpt-5-6-thinking` 均可触发 ChatGPT 原生联网搜索；该能力来自上游模型，不是客户端搜索工具。
 - Aurora 2.5.0 上游公开聊天、Responses、文件问答、图片生成/编辑/变体、TTS、语音转写和音频翻译接口；是否对外开放以每项真实生产探针为准，路由存在或模型列表不能代替能力验收。
+- `scripts/new_api_multimodal_probe.py` 只允许固定生产 New API 地址，从 SQLite 在内存选取一枚可用客户端 Token，并输出固定 Schema 的脱敏 14 项报告。`gpt-4o`、`gpt-image-2`、`tts-1`、`whisper-1` 只有对应真实请求通过后才可保留；原生音频翻译返回非英文时必须继续隐藏。
 
 ### 第三方组件
 
 - Aurora 固定到 2026-08-04 已核对的官方 2.5.0 digest；其余容器继续使用既有不可变 digest，没有引入新的软件包。
+- New API Compose 已固定到官方 `v1.0.0-rc.23` 多架构 manifest `sha256:bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695`，当前仅为待部署目标，不是现场已验证基线。
 - WatchCow 是可选第三方增强，不是核心运行依赖。
 - 不直接使用可漂移的 `latest` 标签。升级时一次只更新一个服务的 digest，并在 NAS 完成运行状态、数据、代理出口和 API 验证后再接受新基线。
 
@@ -101,6 +104,7 @@ New API 是客户端入口；Aurora 负责协议转换；Mihomo 只处理 Aurora
 - 最终收敛不保留旧 Aurora、canary 或其冷备份作为回退；`backups/` 只允许保存当前正式栈按维护门禁创建的恢复包。
 - Mihomo 示例配置只用于首次启动；导入订阅后的真实配置以 `data/mihomo/config.yaml` 为准。
 - 当前 Compose 已把 Aurora 更新为批准的 2.5.0 固定 digest；在 FNOS checkout 快进和唯一正式容器重建完成前，这只是仓库目标状态，不得提前称为现场已完成。
+- 2026-08-04 已完成 New API rc.23 本地升级规格、固定摘要和生产多模态探针准备；FNOS 镜像拉取、冷备份、数据库迁移、浏览器控制台及真实多模态矩阵均仍等待独立现场门禁。
 - 已完成 `scripts/write_n8n_health_status.py` 的 Windows 实现、模拟测试和 FNOS 部署；生产 cron 在 `Asia/Shanghai` 的 05:12、17:12 原子更新单一滚动 `latest.json`，不调用模型、聊天、代理出口或外部 API。
 
 ## n8n 离线健康状态边界

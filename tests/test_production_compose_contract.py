@@ -29,6 +29,19 @@ class ProductionComposeContractTests(unittest.TestCase):
 
         self.assertEqual(compose_files, ["docker-compose.yml"])
 
+    def test_new_api_uses_the_approved_rc23_digest(self):
+        text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn("# 2026-08-04 目标基线：v1.0.0-rc.23", text)
+        self.assertIn(
+            "calciumion/new-api@sha256:"
+            "bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695",
+            text,
+        )
+        self.assertEqual(text.count("container_name: new-api"), 1)
+        self.assertIn("- ./data/new-api:/data", text)
+        self.assertNotIn("calciumion/new-api:latest", text)
+
 
 if __name__ == "__main__":
     unittest.main()

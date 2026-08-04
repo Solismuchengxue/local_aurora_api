@@ -61,7 +61,7 @@ ChatGPT (api.openai.com / chatgpt.com)
 
 > ⚠️ 镜像源 / 代理仅用于拉取，**不要当作运行时出网方式**。本栈的 ChatGPT 出网走的是 mihomo（见 §0），与镜像源无关。
 
-仓库中的 Compose 使用 2026-07-27 在 NAS 实际运行并验证过的不可变镜像 digest，不使用会随上游发布漂移的 `latest`。升级时一次只修改一个服务的 digest；先备份其持久化数据，再执行拉取、重建和完整验证。验证失败时恢复旧 digest 并重建该服务。
+仓库中的 Compose 不使用会随上游发布漂移的 `latest`。Aurora、Mihomo 和 MetaCubeXD 仍使用 NAS 已验证的不可变 digest；New API 已固定到待现场验收的官方 `v1.0.0-rc.23` manifest `sha256:bacbbfbed64b4579213316e0ed78415985223bb20c47fbc24572dd7be5aa1695`。升级时一次只修改一个服务的 digest；先备份其完整持久化数据，再执行拉取、重建和完整验证。
 
 ---
 
@@ -245,6 +245,31 @@ curl http://NAS_IP:3000/v1/chat/completions \
 > WorkBuddy 的 `vendor: "Custom"` 会自动追加 `/chat/completions`，因此 URL 必须填到 `/v1`；当前 Aurora 构建还要求两个模型都设置 `supportsToolCall: false`。完整配置和“？”排障见 [WorkBuddy 自定义模型踩坑指南](workbuddy_custom_models.md)。
 
 ### 9.1 活端点能力实测
+
+#### New API rc.23 升级与多模态门禁
+
+仓库目标从 rc.21 升到 rc.23。该范围包含认证 Session、AuthFlow、渠道、Token、
+模型和 relay 层迁移，因此必须停止 New API 后冷备份整个 `data/new-api/`。若登录、
+SQLite、渠道或核心聊天门禁失败，必须同时恢复 rc.21 digest 与完整冷备份；只回退
+镜像可能留下不兼容的数据状态。
+
+核心门禁通过后，才能临时把 `gpt-4o`、`gpt-image-2`、`tts-1`、`whisper-1`
+加入渠道、默认 Token 和 ability，然后从 FNOS 执行一次：
+
+```bash
+python3 scripts/new_api_multimodal_probe.py \
+  --root /vol1/1000/Solis_Aurora_Gateway \
+  --allow-real-api \
+  --output /tmp/new-api-multimodal-report.json \
+  --json
+```
+
+脚本只连接固定的 `http://127.0.0.1:3000`，从 SQLite 在内存选择一枚可用客户端
+Token，并使用合成、非敏感、大小受限的图片和音频输入。报告不含 Token、提示词、
+响应正文、图片、音频、base64、签名 URL 或原始错误。图片、TTS、语音和组合翻译
+必须返回有效结构或可解码媒体才算 PASS；原生音频翻译未返回英文时继续隐藏。
+
+以上均为目标升级步骤；在 FNOS 现场完成前，不得写成 rc.23 已部署或多模态已开放。
 
 以下结论来自 2026-07-26 使用 curl/Python 对 NAS 活端点的实际调用。它们描述的是当时运行中的 Aurora 构建，而不是根据上游文档推断。
 
@@ -462,7 +487,7 @@ Mihomo 的 `7890` 代理端口不发布到 NAS，只供 Compose 网络内的 Aur
 | 镜像拉取失败 / 超时 | Docker 镜像源不可用 | 先解决镜像源（§2），再 `docker compose up -d` |
 | aurora 报 `no available account` | token 失效 / 渠道密钥填错 | 在 new-api 渠道重新填入有效 token（§8），`docker compose restart aurora` |
 | new-api `root/123456` 登不上 | 镜像未初始化或密码已改 | 清库重建（§7） |
-| 指定模型 `model_not_found` | rc.21 分发器未注册模型 | 渠道点「从上游获取」同步模型（§8） |
+| 指定模型 `model_not_found` | rc.21 及后续分发器未注册模型 | 渠道点「从上游获取」同步模型（§8） |
 | WorkBuddy 只显示“？” | URL 缺少 `/v1`、启用了工具调用或旧会话被拒绝历史污染 | 核对 [WorkBuddy 指南](workbuddy_custom_models.md)，并先新建对话测试 |
 | ChatGPT 返回解锁/地区错误 | aurora 走了非新加坡节点 | 确认出站模式 `GLOBAL` + GLOBAL 首选=新加坡（§6.1） |
 | watchcow 装不出应用 | 应用中心 0.3.3 无 docker 权限 | 改装 GitHub 0.4.4 fpk（§10） |

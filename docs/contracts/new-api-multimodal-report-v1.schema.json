@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solis.local/contracts/new-api-multimodal-report-v1.schema.json",
+  "title": "Solis New API Multimodal Report v1",
+  "type": "object",
+  "required": ["schema_version", "checked_at", "overall", "checks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "checked_at": {"type": "string", "format": "date-time", "maxLength": 32},
+    "overall": {"enum": ["PASS", "FAIL"]},
+    "checks": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 14,
+      "items": false,
+      "prefixItems": [
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "models"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "chat_nonstream"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "chat_stream"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "responses_nonstream"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "responses_stream"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "files"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "vision"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "image_generation"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "image_edit"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "image_variation"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "audio_speech"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "audio_transcription"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "audio_translation"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        },
+        {
+          "type": "object",
+          "required": ["name", "status", "code", "details"],
+          "additionalProperties": false,
+          "properties": {"name": {"const": "audio_translation_composed"}, "status": {"enum": ["PASS", "FAIL"]}, "code": {"type": "string", "maxLength": 64}, "details": {"type": "object", "maxProperties": 5}}
+        }
+      ]
+    }
+  }
+}
