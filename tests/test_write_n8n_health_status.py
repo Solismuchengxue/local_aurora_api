@@ -169,6 +169,36 @@ class DocumentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.build_document(results, datetime.now(timezone.utc))
 
+        results = make_results()
+        results["refresh_log"] = MODULE.CheckResult(
+            "PASS",
+            "refresh_not_applicable",
+            {
+                "event": "not_applicable",
+                "valid_records": 0,
+                "invalid_records": 0,
+                "event_at": "2026-08-04T06:10:25Z",
+            },
+        )
+        document = MODULE.build_document(results, datetime.now(timezone.utc))
+        self.assertEqual(
+            document["checks"]["refresh_log"]["code"],
+            "refresh_not_applicable",
+        )
+
+        results["refresh_log"] = MODULE.CheckResult(
+            "PASS",
+            "refresh_recent",
+            {
+                "event": "not_applicable",
+                "valid_records": 0,
+                "invalid_records": 0,
+                "event_at": "2026-08-04T06:10:25Z",
+            },
+        )
+        with self.assertRaises(ValueError):
+            MODULE.build_document(results, datetime.now(timezone.utc))
+
         results["database"] = MODULE.CheckResult(
             "PASS",
             "database_and_service_key_valid",
@@ -636,6 +666,51 @@ class RefreshStateTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
+    def test_service_key_mode_does_not_consume_legacy_refresh_log(self):
+        database_result = MODULE.CheckResult(
+            "PASS",
+            "database_and_service_key_valid",
+            {
+                "integrity_ok": True,
+                "channel_active": True,
+                "channel_base_matches": True,
+                "service_key_matches": True,
+            },
+        )
+
+        def broken_run(args, timeout=20):
+            raise RuntimeError("sanitized")
+
+        now = datetime(2026, 8, 4, 6, 10, 25, tzinfo=timezone.utc)
+        with (
+            mock.patch.object(
+                MODULE, "check_database", return_value=database_result
+            ),
+            mock.patch.object(MODULE, "check_refresh_state") as refresh,
+        ):
+            results = MODULE.collect_results(
+                Path("/candidate"),
+                1,
+                now,
+                run=broken_run,
+                lock_probe=lambda path: False,
+            )
+
+        refresh.assert_not_called()
+        self.assertEqual(
+            results["refresh_log"],
+            MODULE.CheckResult(
+                "PASS",
+                "refresh_not_applicable",
+                {
+                    "event": "not_applicable",
+                    "valid_records": 0,
+                    "invalid_records": 0,
+                    "event_at": "2026-08-04T06:10:25Z",
+                },
+            ),
+        )
+
     def test_adapter_failures_are_sanitized_and_other_checks_continue(self):
         database_result = MODULE.CheckResult(
             "PASS",

@@ -73,6 +73,7 @@ ALLOWED_CODES = {
     },
     "refresh_log": {
         "refresh_recent",
+        "refresh_not_applicable",
         "refresh_missing",
         "refresh_stale",
         "refresh_malformed",
@@ -97,6 +98,7 @@ EXPECTED_STATUS_BY_CODE = {
     "token_expired": "FAIL",
     "database_invalid": "FAIL",
     "refresh_recent": "PASS",
+    "refresh_not_applicable": "PASS",
     "refresh_missing": "WARN",
     "refresh_stale": "WARN",
     "refresh_malformed": "WARN",
@@ -110,6 +112,14 @@ MAX_STATUS_BYTES = 16 * 1024
 EXPECTED_CONTAINERS = ("aurora", "new-api", "mihomo", "metacubexd")
 EXPECTED_ROOT = "/vol1/1000/Solis_Aurora_Gateway"
 SESSION_CANARY_BASE_URL = "http://aurora-session-renewal-canary:8080"
+SERVICE_KEY_DETAIL_KEYS = frozenset(
+    {
+        "integrity_ok",
+        "channel_active",
+        "channel_base_matches",
+        "service_key_matches",
+    }
+)
 
 CommandRunner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 TcpConnector = Callable[[tuple[str, int], float], object]
@@ -215,12 +225,7 @@ def _validate_details(
             and all(type(value) is bool for value in services.values())
         )
     elif name == "database":
-        service_keys = {
-            "integrity_ok",
-            "channel_active",
-            "channel_base_matches",
-            "service_key_matches",
-        }
+        service_keys = SERVICE_KEY_DETAIL_KEYS
         if code == "database_and_service_key_valid":
             valid = (
                 set(details) == service_keys
@@ -252,24 +257,32 @@ def _validate_details(
             "event_at",
         }:
             raise ValueError("invalid check details")
-        valid = (
-            details["event"]
-            in {
-                "refresh_skipped",
-                "refresh_succeeded",
-                "refresh_failed",
-                "refresh_in_progress",
-                "missing",
-                "lock_unavailable",
-                "invalid_file",
-                "oversized",
-                "unreadable",
-                "invalid_time",
-            }
-            and _valid_nonnegative_integer(details["valid_records"])
-            and _valid_nonnegative_integer(details["invalid_records"])
-            and _valid_utc_text(details["event_at"])
-        )
+        if code == "refresh_not_applicable":
+            valid = (
+                details["event"] == "not_applicable"
+                and details["valid_records"] == 0
+                and details["invalid_records"] == 0
+                and _valid_utc_text(details["event_at"])
+            )
+        else:
+            valid = (
+                details["event"]
+                in {
+                    "refresh_skipped",
+                    "refresh_succeeded",
+                    "refresh_failed",
+                    "refresh_in_progress",
+                    "missing",
+                    "lock_unavailable",
+                    "invalid_file",
+                    "oversized",
+                    "unreadable",
+                    "invalid_time",
+                }
+                and _valid_nonnegative_integer(details["valid_records"])
+                and _valid_nonnegative_integer(details["invalid_records"])
+                and _valid_utc_text(details["event_at"])
+            )
     else:
         valid = False
     if not valid:
@@ -863,12 +876,20 @@ def collect_results(
                 "expires_at": "1970-01-01T00:00:00Z",
             },
         )
-    try:
-        results["refresh_log"] = check_refresh_state(root, now, lock_probe)
-    except (OSError, RuntimeError, TypeError, ValueError):
+    if set(results["database"].details) == SERVICE_KEY_DETAIL_KEYS:
         results["refresh_log"] = _refresh_result(
-            "FAIL", "refresh_lock_unavailable", "lock_unavailable"
+            "PASS",
+            "refresh_not_applicable",
+            "not_applicable",
+            event_at=_utc_text(now.astimezone(timezone.utc)),
         )
+    else:
+        try:
+            results["refresh_log"] = check_refresh_state(root, now, lock_probe)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            results["refresh_log"] = _refresh_result(
+                "FAIL", "refresh_lock_unavailable", "lock_unavailable"
+            )
     return results
 
 
